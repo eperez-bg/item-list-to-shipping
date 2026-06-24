@@ -1,62 +1,156 @@
-.page {
-  max-width: 1000px;
-  margin: 40px auto;
-  padding: 0 20px;
-  font-family: Arial, sans-serif;
+.appShell {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 48px 0 72px;
 }
 
-.dropzone {
-  border: 2px dashed #888;
-  border-radius: 12px;
-  padding: 40px;
+.hero {
+  max-width: 760px;
+  margin-bottom: 28px;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: clamp(2rem, 5vw, 3.4rem);
+  letter-spacing: -0.04em;
+}
+
+.hero p {
+  color: #4b5563;
+  font-size: 1.05rem;
+  line-height: 1.6;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: #2563eb;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.dropZone {
+  display: grid;
+  place-items: center;
+  gap: 10px;
+  min-height: 220px;
+  padding: 28px;
+  border: 2px dashed #94a3b8;
+  border-radius: 18px;
+  background: #f8fafc;
   text-align: center;
-  background: #fafafa;
 }
 
-.fileButton,
-.downloadButton {
-  display: inline-block;
-  margin-top: 12px;
-  padding: 10px 16px;
-  border: none;
-  border-radius: 8px;
-  background: #1f6feb;
-  color: white;
+.dropZone strong {
+  font-size: 1.12rem;
+}
+
+.dropZone span,
+.fileName,
+.status {
+  color: #475569;
+}
+
+.primaryButton,
+.secondaryButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: 9px;
   cursor: pointer;
-  font-size: 14px;
+  font: inherit;
+  font-weight: 700;
 }
 
-.downloadButton {
-  margin-top: 20px;
+.primaryButton {
+  background: #1d4ed8;
+  color: white;
 }
 
-.muted {
-  color: #666;
+.primaryButton:disabled {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.secondaryButton {
+  background: #e2e8f0;
+  color: #0f172a;
 }
 
 .error {
-  color: #b00020;
-  font-weight: bold;
+  margin: 16px 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.previewSection {
+  margin-top: 32px;
+}
+
+.previewHeader {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 16px;
+}
+
+.previewHeader h2,
+.previewHeader p {
+  margin: 0;
+}
+
+.previewHeader p {
+  margin-top: 6px;
+  color: #475569;
 }
 
 .tableWrap {
   overflow-x: auto;
-  margin-top: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 14px;
+  font-size: 0.9rem;
 }
 
 th,
 td {
-  border: 1px solid #ddd;
-  padding: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
   white-space: nowrap;
 }
 
 th {
-  background: #f1f1f1;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+@media (max-width: 640px) {
+  .appShell {
+    width: min(100% - 24px, 1180px);
+    padding-top: 28px;
+  }
+
+  .previewHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
 }

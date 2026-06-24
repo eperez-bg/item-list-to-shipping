@@ -1,221 +1,204 @@
-import { useState } from "react";
-import * as XLSX from "xlsx";
+import { useMemo, useState } from "react";
+import { APP_CONFIG, TEMPLATE_FIELDS } from "./config/transformConfig";
+import { InputWorkbookReader } from "./services/InputWorkbookReader";
+import { TemplateWorkbookService } from "./services/TemplateWorkbookService";
+import { downloadBlob } from "./utils/download";
+import { formatNumber } from "./utils/text";
 import "./App.css";
 
-const INPUT_HEADER_ROW_INDEX = 0;
-
-// Temporary output headers.
-// Later, you can replace these with the yellow template headers.
-const OUTPUT_HEADERS = [
-  "Item",
-  "Description",
-  "Length",
-  "Width",
-  "Height",
-  "Quantity",
-];
-
 function App() {
-  const [rows, setRows] = useState([]);
-  const [fileName, setFileName] = useState("");
-  const [error, setError] = useState("");
+  const services = useMemo(
+    () => ({
+      inputReader: new InputWorkbookReader(APP_CONFIG.input),
+      templateWorkbook: new TemplateWorkbookService({
+        appConfig: APP_CONFIG,
+        templateFields: TEMPLATE_FIELDS,
+      }),
+    }),
+    [],
+  );
 
-  async function handleFile(file) {
+  const [sourceFile, setSourceFile] = useState(null);
+  const [shipment, setShipment] = useState(null);
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
+  const [isBusy, setIsBusy] = useState(false);
+
+  async function loadSourceFile(file) {
+    if (!file) return;
+
+    if (!file.name.toLowerCase().endsWith(".xlsx")) {
+      setError("Please choose an .xlsx source workbook.");
+      return;
+    }
+
+    setIsBusy(true);
     setError("");
-    setRows([]);
-    setFileName(file.name);
+    setStatus("Reading input workbook…");
 
     try {
-      const buffer = await file.arrayBuffer();
+      const parsedShipment = await services.inputReader.readFile(file);
+      setSourceFile(file);
+      setShipment(parsedShipment);
 
-      const workbook = XLSX.read(buffer, {
-        type: "array",
-        cellDates: true,
+      const issueText = parsedShipment.issues.length
+        ? ` ${parsedShipment.issues.length} issue(s) were logged in the browser console.`
+        : "";
+
+      setStatus(
+        `Ready: ${parsedShipment.itemCount} item row(s) across ${parsedShipment.skids.length} skid(s).${issueText}`,
+      );
+    } catch (caughtError) {
+      console.error("[Fuse Order Template Filler]", {
+        type: "INPUT_WORKBOOK_FATAL_ERROR",
+        location: file.name,
+        message: caughtError.message || "Could not read the input workbook.",
+        resolution: "Fix the workbook or configuration, then upload it again.",
       });
+      setSourceFile(null);
+      setShipment(null);
+      setStatus("");
+      setError(caughtError.message || "Could not read the input workbook.");
+    } finally {
+      setIsBusy(false);
+    }
+  }
 
-      const firstSheetName = workbook.SheetNames[0];
-      const worksheet = workbook.Sheets[firstSheetName];
+  async function generateTemplate() {
+    if (!shipment || !sourceFile) return;
 
-      // Important for merged cells
-      fillMergedCells(worksheet);
+    setIsBusy(true);
+    setError("");
+    setStatus("Validating dropdowns and building a copy of the template…");
 
-      const data = XLSX.utils.sheet_to_json(worksheet, {
-        header: 1,
-        defval: "",
-        raw: false,
+    try {
+      const { blob, outputRows, issues } =
+        await services.templateWorkbook.createFilledTemplate(shipment);
+      downloadBlob(blob, APP_CONFIG.template.outputFileName);
+      setStatus(
+        `Downloaded ${outputRows.length} populated template row(s). ${issues.length} issue(s) were logged in the browser console.`,
+      );
+    } catch (caughtError) {
+      console.error("[Fuse Order Template Filler]", {
+        type: "TEMPLATE_GENERATION_FATAL_ERROR",
+        location: APP_CONFIG.template.url,
+        message: caughtError.message || "Could not create the filled template.",
+        resolution: "Check the template workbook and configuration, then try again.",
       });
-
-      const parsedRows = rowsFromHeaderSheet(data, INPUT_HEADER_ROW_INDEX);
-
-      setRows(parsedRows);
-    } catch (err) {
-      console.error(err);
-      setError("Could not read that Excel file.");
+      setError(caughtError.message || "Could not create the filled template.");
+      setStatus("");
+    } finally {
+      setIsBusy(false);
     }
   }
 
-  function downloadOutputWorkbook() {
-    if (rows.length === 0) {
-      setError("Upload an input file first.");
-      return;
-    }
-
-    // Temporary simple mapping.
-    // Later, this is where you will map blue/green headers to yellow headers.
-    const outputRows = rows.map((row) => ({
-      Item: row["Item"] || row["ITEM"] || row["Item #"] || "",
-      Description: row["Description"] || row["DESC"] || "",
-      Length: row["L"] || row["Length"] || "",
-      Width: row["W"] || row["Width"] || "",
-      Height: row["H"] || row["Height"] || "",
-      Quantity: row["Qty"] || row["QTY"] || row["Quantity"] || "",
-    }));
-
-    const outputSheet = XLSX.utils.json_to_sheet(outputRows, {
-      header: OUTPUT_HEADERS,
-    });
-
-    const outputWorkbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(outputWorkbook, outputSheet, "Output");
-
-    XLSX.writeFile(outputWorkbook, "filled-template.xlsx");
-  }
-
-  function handleDrop(event) {
+  function onDrop(event) {
     event.preventDefault();
-
-    const file = event.dataTransfer.files?.[0];
-
-    if (!file) return;
-
-    if (!file.name.endsWith(".xlsx")) {
-      setError("Please upload an .xlsx file.");
-      return;
-    }
-
-    handleFile(file);
+    void loadSourceFile(event.dataTransfer.files?.[0]);
   }
 
-  function handleDragOver(event) {
-    event.preventDefault();
-  }
-
-  function handleInputChange(event) {
-    const file = event.target.files?.[0];
-
-    if (!file) return;
-
-    if (!file.name.endsWith(".xlsx")) {
-      setError("Please upload an .xlsx file.");
-      return;
-    }
-
-    handleFile(file);
-  }
+  const previewRows = shipment
+    ? shipment.skids.flatMap((skid) =>
+        skid.items.map((item, itemIndex) => ({
+          sourceRow: item.sourceRow,
+          type: itemIndex === 0 ? "order" : "commodity",
+          customerPo: item.customerPo,
+          itemCode: item.oldItemCode,
+          quantity: item.quantity,
+          targetStore: item.targetStore || "(blank — Destination left blank)",
+          dimensions: `${skid.length} × ${skid.width} × ${skid.height}`,
+          splitWeight: skid.perItemWeight,
+          palletFraction: skid.palletFraction,
+        })),
+      )
+    : [];
 
   return (
-    <main className="page">
-      <h1>Excel Template Filler</h1>
+    <main className="appShell">
+      <section className="hero">
+        <p className="eyebrow">Fuse Order</p>
+        <h1>Template Filler</h1>
+        <p>
+          Upload the source workbook. The app reads merged skid groups, validates the template dropdowns,
+          and downloads a filled copy without changing the original template file.
+        </p>
+      </section>
 
-      <div
-        className="dropzone"
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
+      <section
+        className="dropZone"
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={onDrop}
       >
-        <p>Drop input XLSX file here</p>
-        <p>or</p>
-
-        <label className="fileButton">
-          Choose File
+        <strong>Drop the source .xlsx workbook here</strong>
+        <span>or</span>
+        <label className="secondaryButton">
+          Choose source workbook
           <input
             type="file"
             accept=".xlsx"
-            onChange={handleInputChange}
             hidden
+            onChange={(event) => void loadSourceFile(event.target.files?.[0])}
           />
         </label>
-      </div>
+      </section>
 
-      {fileName && <p className="muted">Loaded: {fileName}</p>}
+      {sourceFile && <p className="fileName">Loaded: {sourceFile.name}</p>}
+      {status && <p className="status">{status}</p>}
+      {error && <p className="error" role="alert">{error}</p>}
 
-      {error && <p className="error">{error}</p>}
+      {shipment && (
+        <section className="previewSection">
+          <div className="previewHeader">
+            <div>
+              <h2>Input preview</h2>
+              <p>Customer PO is copied from source column B for each item row.</p>
+            </div>
 
-      {rows.length > 0 && (
-        <>
-          <h2>Preview</h2>
-          <p className="muted">Rows found: {rows.length}</p>
+            <button className="primaryButton" onClick={() => void generateTemplate()} disabled={isBusy}>
+              {isBusy ? "Working…" : "Download Filled Template"}
+            </button>
+          </div>
 
           <div className="tableWrap">
             <table>
               <thead>
                 <tr>
-                  {Object.keys(rows[0]).map((header) => (
-                    <th key={header}>{header}</th>
-                  ))}
+                  <th>Source Row</th>
+                  <th>Type</th>
+                  <th>Customer PO</th>
+                  <th>Old Item Code</th>
+                  <th>Qty</th>
+                  <th>Store</th>
+                  <th>L × W × H</th>
+                  <th>Weight / Item</th>
+                  <th>Pallet Share</th>
                 </tr>
               </thead>
-
               <tbody>
-                {rows.slice(0, 10).map((row, rowIndex) => (
-                  <tr key={rowIndex}>
-                    {Object.keys(rows[0]).map((header) => (
-                      <td key={header}>{row[header]}</td>
-                    ))}
+                {previewRows.map((row) => (
+                  <tr key={row.sourceRow}>
+                    <td>{row.sourceRow}</td>
+                    <td>{row.type}</td>
+                    <td>{row.customerPo}</td>
+                    <td>{row.itemCode}</td>
+                    <td>{row.quantity}</td>
+                    <td>{row.targetStore}</td>
+                    <td>{row.dimensions}</td>
+                    <td>{formatPreviewValue(row.splitWeight, 4)}</td>
+                    <td>{formatPreviewValue(row.palletFraction, 4)}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
-
-          <button className="downloadButton" onClick={downloadOutputWorkbook}>
-            Download Filled Template
-          </button>
-        </>
+        </section>
       )}
     </main>
   );
 }
 
-function rowsFromHeaderSheet(data, headerRowIndex) {
-  const headers = data[headerRowIndex].map((header) =>
-    String(header).trim()
-  );
-
-  const bodyRows = data.slice(headerRowIndex + 1);
-
-  return bodyRows
-    .filter((row) => row.some((cell) => String(cell).trim() !== ""))
-    .map((row) => {
-      const obj = {};
-
-      headers.forEach((header, index) => {
-        if (!header) return;
-        obj[header] = row[index] ?? "";
-      });
-
-      return obj;
-    });
-}
-
-function fillMergedCells(worksheet) {
-  const merges = worksheet["!merges"] || [];
-
-  merges.forEach((merge) => {
-    const topLeftAddress = XLSX.utils.encode_cell(merge.s);
-    const topLeftCell = worksheet[topLeftAddress];
-
-    if (!topLeftCell) return;
-
-    for (let row = merge.s.r; row <= merge.e.r; row++) {
-      for (let col = merge.s.c; col <= merge.e.c; col++) {
-        const address = XLSX.utils.encode_cell({ r: row, c: col });
-
-        if (!worksheet[address]) {
-          worksheet[address] = { ...topLeftCell };
-        }
-      }
-    }
-  });
+function formatPreviewValue(value, digits) {
+  return typeof value === "number" ? formatNumber(value, digits) : value;
 }
 
 export default App;
