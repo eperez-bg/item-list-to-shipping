@@ -10,25 +10,31 @@ export const APP_CONFIG = {
   },
 
   input: {
-    // The source workbook uses fixed Excel columns, not header-name matching.
-    firstPossibleDataRow: 2,
     sheetIndex: 0,
-    columns: {
-      // This is read separately for every input row. It supplies every
-      // Target PO# column in the template.
-      customerPo: "B",
-      targetStore: "C",
-      oldItemCode: "E",
-      quantity: "F",
-      length: "J",
-      width: "K",
-      height: "L",
-      grossWeight: "M",
-      pickupNumber: "T",
+
+    /*
+      The input reader finds these headers by exact, case-sensitive text.
+      Their Excel column letters do not matter and may change when columns are
+      deleted from the input workbook.
+
+      All required headers must appear on the same row. Data begins on the row
+      directly below that header row.
+    */
+    headers: {
+      customerPo: "CustomerPO",
+      targetStore: "Store #",
+      oldItemCode: "Old Item code",
+      quantity: "QTY",
+      length: 'L"',
+      width: 'W"',
+      height: 'H"',
+      grossWeight: "G.W. (LBS)",
+      pickupNumber: "IF",
     },
 
-    // A vertically merged range touching any of these columns marks one skid.
-    skidGroupingColumns: ["J", "K", "L"],
+    // A vertically merged range touching one of these header fields marks one
+    // skid. The actual column is found from the header row at runtime.
+    skidGroupingFields: ["length", "width", "height"],
   },
 
   defaults: {
