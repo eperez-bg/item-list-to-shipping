@@ -1,6 +1,10 @@
 import { OutputLoadRow } from "../models/OutputLoadRow";
 import { ERROR_VALUE } from "../utils/importIssues";
-import { isBlank, numericWhenPossible } from "../utils/text";
+import {
+  isBlank,
+  numericWhenPossible,
+  roundToDecimalPlaces,
+} from "../utils/text";
 
 export class OutputRowFactory {
   constructor({ layout, dropdownService, freightClassCalculator, defaults }) {
@@ -41,7 +45,14 @@ export class OutputRowFactory {
             customerPoFinal: customerPo,
 
             projectName: this.defaults.projectName,
-            origin: this.defaults.origin,
+            origin: this.dropdownService.resolveOptionContainingOrBlank(
+              this.layout.addressFor("origin", outputRowNumber),
+              this.defaults.origin,
+              {
+                field: "Origin",
+                sourceLocation: "Application default",
+              },
+            ),
             earliestPickupDate: "",
             earliestPickupTime: "",
             latestPickupDate: "",
@@ -85,8 +96,11 @@ export class OutputRowFactory {
                   }),
                 ),
             temperature: "",
-            pallets: skid.palletFraction,
-            palletSpaces: skid.palletFraction,
+
+            // Template columns AG and AH accept at most three decimal places.
+            pallets: roundToDecimalPlaces(skid.palletFraction, 3),
+            palletSpaces: roundToDecimalPlaces(skid.palletFraction, 3),
+
             trailerFeet: "",
             length: valueOrError(skid.length),
             width: valueOrError(skid.width),

@@ -25,13 +25,6 @@ const ALLOWED_FREIGHT_CLASSES = new Set(
 
 export class FreightClassCalculator {
   constructor(freightConfig = {}, issueReporter) {
-    /*
-      An optional custom classifier can still be added later in
-      transformConfig.js.
-
-      When it remains null, the standard density-band calculation below
-      is used automatically.
-    */
     this.customClassifier =
       typeof freightConfig.classifier === "function"
         ? freightConfig.classifier

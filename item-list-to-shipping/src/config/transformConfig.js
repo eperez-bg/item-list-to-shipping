@@ -33,7 +33,7 @@ export const APP_CONFIG = {
 
   defaults: {
     projectName: "Fuse Order",
-    origin: "Davis",
+    origin: "2354 Davis Ave",
     packaging: "Pallet",
     stackable: "no",
   },

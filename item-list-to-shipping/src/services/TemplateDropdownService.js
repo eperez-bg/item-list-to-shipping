@@ -65,6 +65,77 @@ export class TemplateDropdownService {
     return match;
   }
 
+  resolveOptionContainingOrBlank(cellAddress, searchText, context = {}) {
+    const field = context.field ?? "Dropdown";
+    const sourceLocation = context.sourceLocation ?? "Application default";
+
+    if (isBlank(searchText)) {
+      this.issueReporter.record({
+        type: "DROPDOWN_LEFT_BLANK",
+        location: cellAddress,
+        field,
+        message: `${field} has no usable search value from ${sourceLocation}.`,
+        resolution: "The template dropdown cell was left blank.",
+      });
+
+      return "";
+    }
+
+    const options = this.getOptionsForCell(cellAddress);
+
+    if (options.length === 0) {
+      this.issueReporter.record({
+        type: "TEMPLATE_DROPDOWN_UNREADABLE",
+        location: cellAddress,
+        field,
+        message:
+          `The template dropdown list could not be read while trying to select an option containing "${searchText}".`,
+        resolution: "The template dropdown cell was left blank.",
+      });
+
+      return "";
+    }
+
+    const normalizedSearchText = normalizeText(searchText);
+
+    // Prefer the exact dropdown option first.
+    const exactMatch = options.find(
+      (option) => normalizeText(option) === normalizedSearchText,
+    );
+
+    if (exactMatch !== undefined) {
+      return exactMatch;
+    }
+
+    // For Origin, this selects the full valid dropdown label containing
+    // "2354 Davis Ave". Example: "2354 Davis Ave, Hayward, CA 94545".
+    const matches = this.uniqueOptions(
+      options.filter((option) =>
+        normalizeText(option).includes(normalizedSearchText),
+      ),
+    );
+
+    if (matches.length === 1) {
+      return matches[0];
+    }
+
+    this.issueReporter.record({
+      type:
+        matches.length === 0
+          ? "DROPDOWN_OPTION_NOT_FOUND"
+          : "AMBIGUOUS_DROPDOWN_OPTION",
+      location: cellAddress,
+      field,
+      message:
+        matches.length === 0
+          ? `No ${field} dropdown option contains "${searchText}".`
+          : `More than one ${field} dropdown option contains "${searchText}".`,
+      resolution: "The template dropdown cell was left blank.",
+    });
+
+    return "";
+  }
+
   resolveDestinationOrBlank(cellAddress, storeValue, sourceLocation) {
     if (isBlank(storeValue)) {
       this.issueReporter.record({
@@ -93,21 +164,17 @@ export class TemplateDropdownService {
     }
 
     /*
-      Required matching order:
+      Matching order:
 
-      1. Try the exact store number from input.
+      1. Try the input number exactly.
          Example: 2077 -> Target Store #2077
 
-      2. Only if no exact result exists, prepend one zero.
+      2. Only if no exact result exists, try the same number with one leading zero.
          Example: 2077 -> Target Store #02077
 
-      Similar values such as 20770, 12077, or 207700 will not match because
-      the extracted store number must equal the candidate exactly.
+      This never allows a partial-number match. 2077 will not match 20770.
     */
-    const candidateStoreNumbers = [
-      rawStoreNumber,
-      `0${rawStoreNumber}`,
-    ];
+    const candidateStoreNumbers = [rawStoreNumber, `0${rawStoreNumber}`];
 
     const directOptions = this.getDestinationOptions(cellAddress);
     const workbookOptions = this.getWorkbookDestinationOptions();
@@ -118,42 +185,35 @@ export class TemplateDropdownService {
         candidateStoreNumber,
       );
 
-      const directSelection = this.pickDestinationMatch(
-        directMatches,
-        {
-          source: "data validation list",
-          cellAddress,
-          sourceLocation,
-          rawStoreValue: storeValue,
-          candidateStoreNumber,
-        },
-      );
+      const directSelection = this.pickDestinationMatch(directMatches, {
+        source: "data validation list",
+        cellAddress,
+        sourceLocation,
+        rawStoreValue: storeValue,
+        candidateStoreNumber,
+      });
 
       if (directSelection) {
         return directSelection;
       }
 
       /*
-        Fallback for cases where the template's validation formula cannot be
-        fully read, or the output row is outside the template's original
-        validation range. This searches workbook cells containing labels like:
-        Target Store #2077
+        Fallback for templates where the destination validation formula cannot
+        be fully resolved, or when the output row sits outside the original
+        validation range.
       */
       const workbookMatches = this.findDestinationMatches(
         workbookOptions,
         candidateStoreNumber,
       );
 
-      const workbookSelection = this.pickDestinationMatch(
-        workbookMatches,
-        {
-          source: "template workbook search fallback",
-          cellAddress,
-          sourceLocation,
-          rawStoreValue: storeValue,
-          candidateStoreNumber,
-        },
-      );
+      const workbookSelection = this.pickDestinationMatch(workbookMatches, {
+        source: "template workbook search fallback",
+        cellAddress,
+        sourceLocation,
+        rawStoreValue: storeValue,
+        candidateStoreNumber,
+      });
 
       if (workbookSelection) {
         console.warn("[Fuse Order Template Filler]", {
@@ -214,24 +274,16 @@ export class TemplateDropdownService {
       .replace(/,/g, "")
       .trim();
 
-    /*
-      Accepts:
-      2077
-      02077
-      2077.0
-
-      Keeps leading zeroes when they are present in the source file.
-    */
+    // Accepts: 2077, 02077, and Excel-style values such as 2077.0.
+    // Leading zeroes in the source are preserved.
     const directMatch = text.match(/^(\d+)(?:\.0+)?$/);
 
     if (directMatch) {
       return directMatch[1];
     }
 
-    /*
-      Also accepts a source value such as "Store 2077", but rejects source
-      values that contain multiple unrelated numbers.
-    */
+    // Also accepts a label such as "Store 2077", but rejects values with
+    // multiple unrelated number groups.
     const numberGroups = text.match(/\d+/g) ?? [];
 
     return numberGroups.length === 1 ? numberGroups[0] : "";
@@ -242,10 +294,8 @@ export class TemplateDropdownService {
       return "";
     }
 
-    /*
-      Do not leave the cell blank merely because the same store number appears
-      more than once in the source list. Choose the first valid exact option.
-    */
+    // Duplicated labels in a source list should not make a valid exact store
+    // selection fail. uniqueOptions removes identical labels first.
     if (matches.length > 1) {
       console.warn("[Fuse Order Template Filler]", {
         type: "MULTIPLE_EXACT_DESTINATION_OPTIONS",
@@ -278,9 +328,8 @@ export class TemplateDropdownService {
     }
 
     /*
-      If the current output row is beyond the original validation range, use
-      the biggest validation list in the template that contains Target Store
-      values. The worksheet patcher later expands the validation range.
+      The sheet patcher can extend a validation down to new rows after the
+      output is created. Here we still need its source list before that patch.
     */
     if (this.destinationOptionsFallback) {
       return this.destinationOptionsFallback;
@@ -307,7 +356,7 @@ export class TemplateDropdownService {
         type: "DESTINATION_VALIDATION_RANGE_FALLBACK",
         location: cellAddress,
         message:
-          "The output row was outside the original Destination validation range. The app used the template's Destination list and will extend validation in the downloaded workbook.",
+          "The output row was outside the original Destination validation range. The app used the template Destination list and will extend validation in the downloaded workbook.",
       });
     }
 
@@ -382,8 +431,6 @@ export class TemplateDropdownService {
       Target Store #2077  -> 2077
       Target Store #02077 -> 02077
       Target Store #20770 -> 20770
-
-      This does not transform, pad, trim, or partially match the number.
     */
     const expression = new RegExp(`${prefix}\\s*(\\d+)\\b`, "i");
     const match = normalizeText(option).match(expression);

@@ -78,3 +78,13 @@ export function formatNumber(value, digits = 2) {
     maximumFractionDigits: digits,
   });
 }
+
+export function roundToDecimalPlaces(value, decimalPlaces = 3) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return value;
+  }
+
+  const multiplier = 10 ** decimalPlaces;
+
+  return Math.round((value + Number.EPSILON) * multiplier) / multiplier;
+}
