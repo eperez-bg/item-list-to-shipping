@@ -2,7 +2,7 @@ export const APP_CONFIG = {
   template: {
     // Put the untouched original template here:
     // public/templates/fuse-order-template.xlsx
-    url: "/templates/fuse-order-template.xlsx",
+    url: `${import.meta.env.BASE_URL}templates/fuse-order-template.xlsx`,
     outputFileName: "fuse-order-filled.xlsx",
 
     // Set this only if the yellow-header worksheet is not detected automatically.
