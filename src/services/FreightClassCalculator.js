@@ -1,3 +1,5 @@
+import { toFiniteNumber } from "../utils/text";
+
 const DENSITY_CLASS_BANDS = [
   { minimumDensity: 50, freightClass: 50 },
   { minimumDensity: 35, freightClass: 55 },
@@ -33,16 +35,28 @@ export class FreightClassCalculator {
     this.issueReporter = issueReporter;
   }
 
-  calculate(skid) {
-    const rowRange = `${skid.sourceStartRow}-${skid.sourceEndRow}`;
+  /*
+    Freight Class is calculated per output item row. The item receives:
+      - the full L/W/H from its physical merged-dimension group
+      - its own allocated G.W. share from the source G.W. range
 
-    if (!skid.hasValidFreightMeasurements) {
+    This intentionally allows two items in the same PO to have different
+    classes when they originated from different dimension groups.
+  */
+  calculate(item) {
+    const location = `Input row ${item.sourceRow}`;
+    const length = positiveNumberOrNull(item.length);
+    const width = positiveNumberOrNull(item.width);
+    const height = positiveNumberOrNull(item.height);
+    const grossWeight = positiveNumberOrNull(item.allocatedWeight);
+
+    if (!length || !width || !height || !grossWeight) {
       this.issueReporter.record({
         type: "FREIGHT_CLASS_SKIPPED",
-        location: `Input skid rows ${rowRange}`,
+        location,
         field: "Freight Class",
         message:
-          "Freight Class could not be calculated because one or more source dimensions or gross-weight values are missing or invalid.",
+          "Freight Class could not be calculated because this item has one or more missing or invalid dimensions or allocated gross-weight values.",
         resolution:
           "Freight Class is a template dropdown, so it will be left blank.",
       });
@@ -50,21 +64,16 @@ export class FreightClassCalculator {
       return "";
     }
 
-    const length = skid.numericLength;
-    const width = skid.numericWidth;
-    const height = skid.numericHeight;
-    const grossWeight = skid.numericGrossWeight;
-
     const cubicFeet = (length * width * height) / 1728;
     const densityPcf = grossWeight / cubicFeet;
 
     if (!Number.isFinite(cubicFeet) || cubicFeet <= 0) {
       this.issueReporter.record({
         type: "INVALID_FREIGHT_VOLUME",
-        location: `Input skid rows ${rowRange}`,
+        location,
         field: "Freight Class",
         message:
-          "The skid volume could not be calculated from Length, Width, and Height.",
+          "The item's volume could not be calculated from Length, Width, and Height.",
         resolution:
           "Freight Class is a template dropdown, so it will be left blank.",
       });
@@ -75,10 +84,10 @@ export class FreightClassCalculator {
     if (!Number.isFinite(densityPcf) || densityPcf <= 0) {
       this.issueReporter.record({
         type: "INVALID_FREIGHT_DENSITY",
-        location: `Input skid rows ${rowRange}`,
+        location,
         field: "Freight Class",
         message:
-          "Freight density could not be calculated from the skid dimensions and gross weight.",
+          "The item's freight density could not be calculated from its dimensions and allocated gross weight.",
         resolution:
           "Freight Class is a template dropdown, so it will be left blank.",
       });
@@ -94,6 +103,7 @@ export class FreightClassCalculator {
           grossWeight,
           cubicFeet,
           densityPcf,
+          item,
         })
       : this.getDensityBasedFreightClass(densityPcf);
 
@@ -102,7 +112,7 @@ export class FreightClassCalculator {
     if (freightClass === null) {
       this.issueReporter.record({
         type: "INVALID_FREIGHT_CLASS_RESULT",
-        location: `Input skid rows ${rowRange}`,
+        location,
         field: "Freight Class",
         message:
           `The freight-class calculation returned "${calculatedClass}", ` +
@@ -116,7 +126,11 @@ export class FreightClassCalculator {
 
     console.info("[Fuse Order Template Filler]", {
       type: "FREIGHT_CLASS_CALCULATED",
-      location: `Input skid rows ${rowRange}`,
+      location,
+      dimensionSourceRows:
+        item.dimensionSourceStartRow && item.dimensionSourceEndRow
+          ? `${item.dimensionSourceStartRow}-${item.dimensionSourceEndRow}`
+          : null,
       length,
       width,
       height,
@@ -148,4 +162,9 @@ export class FreightClassCalculator {
       ? numericValue
       : null;
   }
+}
+
+function positiveNumberOrNull(value) {
+  const numericValue = toFiniteNumber(value);
+  return numericValue !== null && numericValue > 0 ? numericValue : null;
 }

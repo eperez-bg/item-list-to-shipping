@@ -46,7 +46,7 @@ function App() {
         : "";
 
       setStatus(
-        `Ready: ${parsedShipment.itemCount} item row(s) across ${parsedShipment.skids.length} skid(s).${issueText}`,
+        `Ready: ${parsedShipment.itemCount} item row(s) across ${parsedShipment.purchaseOrderCount} Customer PO(s).${issueText}`,
       );
     } catch (caughtError) {
       console.error("[Fuse Order Template Filler]", {
@@ -97,21 +97,7 @@ function App() {
     void loadSourceFile(event.dataTransfer.files?.[0]);
   }
 
-  const previewRows = shipment
-    ? shipment.skids.flatMap((skid) =>
-        skid.items.map((item, itemIndex) => ({
-          sourceRow: item.sourceRow,
-          type: itemIndex === 0 ? "order" : "commodity",
-          customerPo: item.customerPo,
-          itemCode: item.oldItemCode,
-          quantity: item.quantity,
-          targetStore: item.targetStore || "(blank — Destination left blank)",
-          dimensions: `${skid.length} × ${skid.width} × ${skid.height}`,
-          splitWeight: skid.perItemWeight,
-          palletFraction: skid.palletFraction,
-        })),
-      )
-    : [];
+  const previewRows = shipment ? buildPreviewRows(shipment) : [];
 
   return (
     <main className="appShell">
@@ -119,8 +105,9 @@ function App() {
         <p className="eyebrow">Fuse Order</p>
         <h1>Template Filler</h1>
         <p>
-          Upload the source workbook. The app reads merged skid groups, validates the template dropdowns,
-          and downloads a filled copy without changing the original template file.
+          Upload the source workbook. The app reads shared dimensions and weights,
+          validates template dropdowns, and downloads a filled copy without changing
+          the original template file.
         </p>
       </section>
 
@@ -151,10 +138,18 @@ function App() {
           <div className="previewHeader">
             <div>
               <h2>Input preview</h2>
-              <p>Customer PO is copied from source column B for each item row.</p>
+              <p>
+                The first row for each Customer PO is Order; later rows with that
+                PO are Commodity. Pallet and pallet-space shares are split across
+                all items with the same Customer PO.
+              </p>
             </div>
 
-            <button className="primaryButton" onClick={() => void generateTemplate()} disabled={isBusy}>
+            <button
+              className="primaryButton"
+              onClick={() => void generateTemplate()}
+              disabled={isBusy}
+            >
               {isBusy ? "Working…" : "Download Filled Template"}
             </button>
           </div>
@@ -171,7 +166,7 @@ function App() {
                   <th>Store</th>
                   <th>L × W × H</th>
                   <th>Weight / Item</th>
-                  <th>Pallet Share</th>
+                  <th>PO Pallet Share</th>
                 </tr>
               </thead>
               <tbody>
@@ -184,8 +179,8 @@ function App() {
                     <td>{row.quantity}</td>
                     <td>{row.targetStore}</td>
                     <td>{row.dimensions}</td>
-                    <td>{formatPreviewValue(row.splitWeight, 4)}</td>
-                    <td>{formatPreviewValue(row.palletFraction, 4)}</td>
+                    <td>{formatPreviewValue(row.allocatedWeight, 4)}</td>
+                    <td>{formatPreviewValue(row.palletFraction, 3)}</td>
                   </tr>
                 ))}
               </tbody>
@@ -194,6 +189,26 @@ function App() {
         </section>
       )}
     </main>
+  );
+}
+
+function buildPreviewRows(shipment) {
+  return shipment.skids.flatMap((skid) =>
+    skid.items.map((item) => {
+      const purchaseOrder = shipment.getPurchaseOrderForItem(item);
+
+      return {
+        sourceRow: item.sourceRow,
+        type: purchaseOrder.isFirstItem(item) ? "order" : "commodity",
+        customerPo: item.customerPo,
+        itemCode: item.oldItemCode,
+        quantity: item.quantity,
+        targetStore: item.targetStore || "(blank — Destination left blank)",
+        dimensions: `${item.length} × ${item.width} × ${item.height}`,
+        allocatedWeight: item.allocatedWeight,
+        palletFraction: purchaseOrder.getPalletShareForItem(item, 3),
+      };
+    }),
   );
 }
 

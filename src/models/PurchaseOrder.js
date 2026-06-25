@@ -1,20 +1,14 @@
 import { ERROR_VALUE } from "../utils/importIssues";
 
-export class InputSkid {
-  constructor({
-    sourceStartRow,
-    sourceEndRow,
-    length,
-    width,
-    height,
-    items,
-  }) {
-    this.sourceStartRow = sourceStartRow;
-    this.sourceEndRow = sourceEndRow;
-    this.length = length;
-    this.width = width;
-    this.height = height;
+export class PurchaseOrder {
+  constructor({ key, customerPo, items = [] }) {
+    this.key = key;
+    this.customerPo = customerPo;
     this.items = items;
+  }
+
+  addItem(item) {
+    this.items.push(item);
   }
 
   get itemCount() {
@@ -22,15 +16,11 @@ export class InputSkid {
   }
 
   /*
-    Pallets and Pallet Spaces represent the physical L/W/H merged group.
+    Returns this item's share of one pallet / one pallet space for its PO.
 
-    - A one-row, non-merged dimension group receives 1.000.
-    - A merged dimension group shares one pallet across the actual item rows
-      in that group.
-    - Rounding is distributed so the group totals exactly 1.000 while no row
-      has more than three decimal places.
+    The share uses at most three decimal places and distributes the rounding
+    remainder across the first rows. That means every PO totals exactly 1.000:
 
-    Examples:
       3 items -> 0.334, 0.333, 0.333
       6 items -> 0.167, 0.167, 0.167, 0.167, 0.166, 0.166
   */
@@ -47,5 +37,9 @@ export class InputSkid {
     const shareUnits = baseUnits + (itemIndex < remainderUnits ? 1 : 0);
 
     return shareUnits / scale;
+  }
+
+  isFirstItem(item) {
+    return this.items[0] === item;
   }
 }

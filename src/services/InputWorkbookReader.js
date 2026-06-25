@@ -47,7 +47,18 @@ export class InputWorkbookReader {
     const merges = worksheet["!merges"] ?? [];
     const range = XLSX.utils.decode_range(usedRange);
     const headerMap = this.findRequiredHeaderColumns(worksheet, range, sheetName);
+
+    /*
+      Dimensions determine the physical pallet/skid group. PO never does.
+      PO is used later only to decide Order vs Commodity.
+    */
     const groupedItems = new Map();
+
+    /*
+      G.W. has its own grouping because its merged range may not be exactly the
+      same as the L/W/H merged range.
+    */
+    const weightGroups = new Map();
     let hasReachedData = false;
 
     for (
@@ -70,8 +81,8 @@ export class InputWorkbookReader {
         merges,
       );
 
-      // Ignore completely blank rows. Before actual item data begins, also
-      // ignore labels/notes that do not have a quantity.
+      // Ignore completely blank rows. Before item data begins, also ignore
+      // labels/notes that do not contain a quantity.
       if (isBlank(rawOldItemCode) && isBlank(rawQuantity)) continue;
       if (!hasReachedData && isBlank(rawQuantity)) continue;
 
@@ -112,20 +123,18 @@ export class InputWorkbookReader {
         rowNumber,
         merges,
       );
+      const targetStoreSourceLocation = this.addressFor(
+        headerMap.columns.targetStore,
+        rowNumber,
+      );
 
       if (isBlank(targetStore)) {
-        const location = this.addressFor(
-          headerMap.columns.targetStore,
-          rowNumber,
-        );
-
         reporter.record({
           type: "MISSING_INPUT_VALUE",
-          location,
+          location: targetStoreSourceLocation,
           field: "Target Store",
-          message: `Input cell ${location} is blank.`,
-          resolution:
-            'Destination is a template dropdown, so it will be left blank. The second Target PO# field will receive "ERROR".',
+          message: `Input cell ${targetStoreSourceLocation} is blank.`,
+          resolution: "Destination is a template dropdown, so it will be left blank.",
         });
       }
 
@@ -149,10 +158,18 @@ export class InputWorkbookReader {
       );
       const skidKey = `${skidRange.startRow}:${skidRange.endRow}`;
 
+      const weightRange = this.findWeightRangeForRow(
+        rowIndex,
+        headerMap.columns.grossWeight,
+        merges,
+      );
+      const weightKey = `${weightRange.startRow}:${weightRange.endRow}:${headerMap.columns.grossWeight}`;
+
       const item = new InputItem({
         sourceRow: rowNumber,
         customerPo,
         targetStore,
+        targetStoreSourceLocation,
         oldItemCode,
         quantity,
         pickupNumber,
@@ -161,8 +178,12 @@ export class InputWorkbookReader {
       if (!groupedItems.has(skidKey)) {
         groupedItems.set(skidKey, { range: skidRange, items: [] });
       }
-
       groupedItems.get(skidKey).items.push(item);
+
+      if (!weightGroups.has(weightKey)) {
+        weightGroups.set(weightKey, { range: weightRange, items: [] });
+      }
+      weightGroups.get(weightKey).items.push(item);
     }
 
     if (groupedItems.size === 0) {
@@ -170,12 +191,18 @@ export class InputWorkbookReader {
         type: "NO_INPUT_ITEMS_FOUND",
         location: `${sheetName}!${headerMap.headerRowNumber}:${headerMap.headerRowNumber}`,
         field: "Input item rows",
-        message:
-          "No item rows were found below the required input header row.",
-        resolution:
-          "Check that item rows contain values in both Old Item code and QTY.",
+        message: "No item rows were found below the required input header row.",
+        resolution: "Check that item rows contain values in both Old Item code and QTY.",
       });
     }
+
+    this.allocateItemWeights({
+      worksheet,
+      merges,
+      weightGroups,
+      grossWeightColumnIndex: headerMap.columns.grossWeight,
+      reporter,
+    });
 
     const skids = Array.from(groupedItems.values())
       .sort((left, right) => left.range.startRow - right.range.startRow)
@@ -238,15 +265,17 @@ export class InputWorkbookReader {
     for (let rowIndex = range.s.r; rowIndex <= range.e.r; rowIndex += 1) {
       const matchesForRow = new Map();
 
-      for (let columnIndex = range.s.c; columnIndex <= range.e.c; columnIndex += 1) {
+      for (
+        let columnIndex = range.s.c;
+        columnIndex <= range.e.c;
+        columnIndex += 1
+      ) {
         const cell = worksheet[
           XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })
         ];
         const cellText = getCellDisplayValue(cell).trim();
 
-        if (!requiredHeaderTexts.includes(cellText)) {
-          continue;
-        }
+        if (!requiredHeaderTexts.includes(cellText)) continue;
 
         if (!matchesForRow.has(cellText)) {
           matchesForRow.set(cellText, []);
@@ -365,44 +394,91 @@ export class InputWorkbookReader {
     return locations.join("; ");
   }
 
+  allocateItemWeights({
+    worksheet,
+    merges,
+    weightGroups,
+    grossWeightColumnIndex,
+    reporter,
+  }) {
+    weightGroups.forEach(({ range: weightRange, items }) => {
+      const totalWeight = this.readPositiveNumberOrError({
+        worksheet,
+        merges,
+        columnIndex: grossWeightColumnIndex,
+        rowNumber: weightRange.startRow,
+        field: "Gross Weight",
+        reporter,
+      });
+
+      const allocatedWeight =
+        totalWeight === ERROR_VALUE ? ERROR_VALUE : totalWeight / items.length;
+
+      items.forEach((item) => {
+        item.allocatedWeight = allocatedWeight;
+      });
+
+      if (weightRange.isMerged && items.length > 1) {
+        console.info("[Fuse Order Template Filler]", {
+          type: "MERGED_WEIGHT_SPLIT",
+          sourceRows: `${weightRange.startRow}-${weightRange.endRow}`,
+          totalWeight,
+          itemCount: items.length,
+          weightPerItem: allocatedWeight,
+          itemSourceRows: items.map((item) => item.sourceRow),
+        });
+      }
+    });
+  }
+
   createSkid(worksheet, merges, skidRange, items, reporter, columns) {
     const sourceRow = skidRange.startRow;
+    const length = this.readPositiveNumberOrError({
+      worksheet,
+      merges,
+      columnIndex: columns.length,
+      rowNumber: sourceRow,
+      field: "Length",
+      reporter,
+    });
+    const width = this.readPositiveNumberOrError({
+      worksheet,
+      merges,
+      columnIndex: columns.width,
+      rowNumber: sourceRow,
+      field: "Width",
+      reporter,
+    });
+    const height = this.readPositiveNumberOrError({
+      worksheet,
+      merges,
+      columnIndex: columns.height,
+      rowNumber: sourceRow,
+      field: "Height",
+      reporter,
+    });
+
+    /*
+      Each item keeps the full dimensions of its physical L/W/H merge group.
+      Later PO grouping only affects Type, Pallets, and Pallet Spaces; it must
+      not overwrite dimensions or make all items in a PO share one freight class.
+    */
+    items.forEach((item) => {
+      item.assignDimensions({
+        length,
+        width,
+        height,
+        sourceStartRow: skidRange.startRow,
+        sourceEndRow: skidRange.endRow,
+      });
+    });
 
     return new InputSkid({
       sourceStartRow: skidRange.startRow,
       sourceEndRow: skidRange.endRow,
-      length: this.readPositiveNumberOrError({
-        worksheet,
-        merges,
-        columnIndex: columns.length,
-        rowNumber: sourceRow,
-        field: "Length",
-        reporter,
-      }),
-      width: this.readPositiveNumberOrError({
-        worksheet,
-        merges,
-        columnIndex: columns.width,
-        rowNumber: sourceRow,
-        field: "Width",
-        reporter,
-      }),
-      height: this.readPositiveNumberOrError({
-        worksheet,
-        merges,
-        columnIndex: columns.height,
-        rowNumber: sourceRow,
-        field: "Height",
-        reporter,
-      }),
-      grossWeight: this.readPositiveNumberOrError({
-        worksheet,
-        merges,
-        columnIndex: columns.grossWeight,
-        rowNumber: sourceRow,
-        field: "Gross Weight",
-        reporter,
-      }),
+      length,
+      width,
+      height,
       items,
     });
   }
@@ -444,9 +520,7 @@ export class InputWorkbookReader {
   }
 
   valueOrError({ value, columnIndex, rowNumber, field, reporter }) {
-    if (!isBlank(value)) {
-      return value;
-    }
+    if (!isBlank(value)) return value;
 
     const location = this.addressFor(columnIndex, rowNumber);
 
@@ -487,6 +561,32 @@ export class InputWorkbookReader {
     return { startRow: bestRange.s.r + 1, endRow: bestRange.e.r + 1 };
   }
 
+  findWeightRangeForRow(rowIndex, grossWeightColumnIndex, merges) {
+    const matchingMerge = merges.find((merge) => {
+      const vertical = merge.e.r > merge.s.r;
+      const containsRow = merge.s.r <= rowIndex && rowIndex <= merge.e.r;
+      const touchesGrossWeightColumn =
+        merge.s.c <= grossWeightColumnIndex &&
+        grossWeightColumnIndex <= merge.e.c;
+
+      return vertical && containsRow && touchesGrossWeightColumn;
+    });
+
+    if (!matchingMerge) {
+      return {
+        startRow: rowIndex + 1,
+        endRow: rowIndex + 1,
+        isMerged: false,
+      };
+    }
+
+    return {
+      startRow: matchingMerge.s.r + 1,
+      endRow: matchingMerge.e.r + 1,
+      isMerged: true,
+    };
+  }
+
   readEffectiveValue(worksheet, columnIndex, rowNumber, merges) {
     const cell = this.readEffectiveCell(
       worksheet,
@@ -516,9 +616,7 @@ export class InputWorkbookReader {
         coordinate.r <= candidate.e.r,
     );
 
-    if (!merge) {
-      return directCell;
-    }
+    if (!merge) return directCell;
 
     return worksheet[XLSX.utils.encode_cell(merge.s)] ?? directCell;
   }
