@@ -102,7 +102,7 @@ export class OutputRowFactory {
             deliveryContactPhone: "",
             deliveryNumber: "",
             destinationSpecialInstructions: "",
-            itemId: valueOrError(item.oldItemCode),
+            itemId: "",
             description: valueOrError(item.oldItemCode),
             packaging: dropdown("packaging", this.defaults.packaging, {
               field: "Packaging",
