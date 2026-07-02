@@ -1,6 +1,7 @@
 import JSZip from "jszip";
 import * as XLSX from "xlsx";
 import { FreightClassCalculator } from "./FreightClassCalculator";
+import { FtlOutputRowFactory } from "./FtlOutputRowFactory";
 import { OutputRowFactory } from "./OutputRowFactory";
 import { TemplateDropdownService } from "./TemplateDropdownService";
 import { TemplateLayoutService } from "./TemplateLayoutService";
@@ -10,10 +11,20 @@ import { ImportIssueReporter } from "../utils/importIssues";
 import { elementChildren, parseXml } from "../utils/xml";
 
 export class TemplateWorkbookService {
-  constructor({ appConfig, templateFields }) {
+  constructor({ appConfig, templateConfig, templateFields, shippingMode }) {
     this.appConfig = appConfig;
-    this.layoutService = new TemplateLayoutService(appConfig.template, templateFields);
+    this.templateConfig = templateConfig;
+    this.shippingMode = shippingMode;
+    this.layoutService = new TemplateLayoutService(templateConfig, templateFields);
     this.worksheetPatcher = new TemplateWorksheetPatcher();
+  }
+
+  get templateUrl() {
+    return this.templateConfig.url;
+  }
+
+  get outputFileName() {
+    return this.templateConfig.outputFileName;
   }
 
   async createFilledTemplate(shipment) {
@@ -36,15 +47,12 @@ export class TemplateWorkbookService {
       destinationConfig: this.appConfig.destination,
       issueReporter,
     });
-    const freightClassCalculator = new FreightClassCalculator(
-      this.appConfig.freight,
-      issueReporter,
-    );
-    const outputRowFactory = new OutputRowFactory({
+    const freightClassCalculator = new FreightClassCalculator(this.appConfig.freight, issueReporter);
+    const outputRowFactory = this.createOutputRowFactory({
       layout,
       dropdownService,
       freightClassCalculator,
-      defaults: this.appConfig.defaults,
+      issueReporter,
     });
     const outputRows = outputRowFactory.build(shipment);
 
@@ -58,20 +66,33 @@ export class TemplateWorkbookService {
     return { blob, outputRows, layout, issues: issueReporter.issues };
   }
 
+  createOutputRowFactory({ layout, dropdownService, freightClassCalculator, issueReporter }) {
+    const sharedOptions = {
+      layout,
+      dropdownService,
+      freightClassCalculator,
+      defaults: this.appConfig.defaults,
+    };
+
+    if (this.shippingMode === "FTL") {
+      return new FtlOutputRowFactory({ ...sharedOptions, issueReporter });
+    }
+
+    return new OutputRowFactory(sharedOptions);
+  }
+
   async fetchTemplate() {
     let response;
 
     try {
-      response = await fetch(this.appConfig.template.url, { cache: "no-store" });
+      response = await fetch(this.templateConfig.url, { cache: "no-store" });
     } catch {
-      throw new UserFacingError(
-        `Could not load the template at public${this.appConfig.template.url}.`,
-      );
+      throw new UserFacingError(`Could not load the template at ${this.templateConfig.url}.`);
     }
 
     if (!response.ok) {
       throw new UserFacingError(
-        `Could not load the template at public${this.appConfig.template.url}. Check that the filename and path are exact.`,
+        `Could not load the template at ${this.templateConfig.url}. Check that the filename and path are exact.`,
       );
     }
 
@@ -107,12 +128,11 @@ export class TemplateWorkbookService {
         "id",
       );
 
-    const relationship = elementChildren(
-      relationshipsXml.documentElement,
-      "Relationship",
-    ).find((node) => node.getAttribute("Id") === relationshipId);
-
+    const relationship = elementChildren(relationshipsXml.documentElement, "Relationship").find(
+      (node) => node.getAttribute("Id") === relationshipId,
+    );
     const target = relationship?.getAttribute("Target");
+
     if (!target) {
       throw new UserFacingError(`Could not find the file for worksheet "${sheetName}".`);
     }

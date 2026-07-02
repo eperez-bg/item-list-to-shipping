@@ -1,4 +1,5 @@
 import { PurchaseOrder } from "./PurchaseOrder";
+import { Truckload } from "./Truckload";
 import { ERROR_VALUE } from "../utils/importIssues";
 import { normalizeText } from "../utils/text";
 
@@ -8,8 +9,12 @@ export class InputShipment {
     this.issues = issues;
 
     this.items = this.skids.flatMap((skid) => skid.items);
+
     this.purchaseOrders = this.createPurchaseOrders();
     this.purchaseOrderByItem = this.createPurchaseOrderIndex();
+
+    this.trucks = this.createTruckloads();
+    this.truckByItem = this.createTruckIndex();
   }
 
   get itemCount() {
@@ -20,8 +25,16 @@ export class InputShipment {
     return this.purchaseOrders.length;
   }
 
+  get truckCount() {
+    return this.trucks.length;
+  }
+
   getPurchaseOrderForItem(item) {
     return this.purchaseOrderByItem.get(item) ?? null;
+  }
+
+  getTruckForItem(item) {
+    return this.truckByItem.get(item) ?? null;
   }
 
   createPurchaseOrders() {
@@ -58,18 +71,61 @@ export class InputShipment {
     return index;
   }
 
-  getPurchaseOrderKey(customerPo, sourceRow) {
-    const normalizedPo = normalizeText(customerPo);
+  createTruckloads() {
+    const groups = new Map();
 
-    /*
-      Missing / ERROR POs must never be combined. Each row is treated as its
-      own PO group so separate unknown orders do not accidentally become
-      Commodity rows or share pallet fractions.
-    */
-    if (!normalizedPo || normalizedPo === normalizeText(ERROR_VALUE)) {
-      return `missing-or-error-po-row-${sourceRow}`;
+    this.items.forEach((item) => {
+      const key = this.getTruckKey(item.truckNumber, item.sourceRow);
+
+      if (!groups.has(key)) {
+        groups.set(
+          key,
+          new Truckload({
+            key,
+            truckNumber: item.truckNumber,
+          }),
+        );
+      }
+
+      groups.get(key).addItem(item);
+    });
+
+    return Array.from(groups.values());
+  }
+
+  createTruckIndex() {
+    const index = new Map();
+
+    this.trucks.forEach((truck) => {
+      truck.items.forEach((item) => {
+        index.set(item, truck);
+      });
+    });
+
+    return index;
+  }
+
+  getPurchaseOrderKey(customerPo, sourceRow) {
+    return this.getNormalizedGroupKey("missing-or-error-po", customerPo, sourceRow);
+  }
+
+  getTruckKey(truckNumber, sourceRow) {
+    return this.getNormalizedGroupKey(
+      "missing-or-error-truck",
+      truckNumber,
+      sourceRow,
+    );
+  }
+
+  getNormalizedGroupKey(missingPrefix, value, sourceRow) {
+    const normalizedValue = normalizeText(value);
+
+    // Unknown values must never get grouped together. Each bad row is its own
+    // Order row instead of accidentally becoming Commodity.
+    if (!normalizedValue || normalizedValue === normalizeText(ERROR_VALUE)) {
+      return `${missingPrefix}-row-${sourceRow}`;
     }
 
-    return normalizedPo;
+    return normalizedValue;
   }
 }

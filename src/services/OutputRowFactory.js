@@ -1,10 +1,15 @@
 import { OutputLoadRow } from "../models/OutputLoadRow";
 import { ERROR_VALUE } from "../utils/importIssues";
-import {
-  isBlank,
-  numericWhenPossible,
-} from "../utils/text";
+import { isBlank, numericWhenPossible } from "../utils/text";
 
+/*
+  LTL output factory.
+
+  The completed template is grouped by Customer PO in first-appearance order:
+  every PO's Order row is immediately followed by its Commodity rows.
+
+  Physical merged L/W/H groups are still used only for Pallets / Pallet Spaces.
+*/
 export class OutputRowFactory {
   constructor({ layout, dropdownService, freightClassCalculator, defaults }) {
     this.layout = layout;
@@ -15,25 +20,24 @@ export class OutputRowFactory {
 
   build(shipment) {
     const outputRows = [];
+    const skidByItem = this.createSkidIndex(shipment);
 
-    shipment.skids.forEach((skid) => {
-      skid.items.forEach((item) => {
-        const outputRowNumber = this.layout.firstDataRow + outputRows.length;
-        const purchaseOrder = shipment.getPurchaseOrderForItem(item);
+    /*
+      InputShipment creates purchaseOrders in the order each PO first appears
+      in the source file. Walking each PO group directly guarantees that the
+      Order row and all of its Commodity rows stay together in the download.
+    */
+    shipment.purchaseOrders.forEach((purchaseOrder) => {
+      purchaseOrder.items.forEach((item) => {
+        const skid = skidByItem.get(item);
 
-        if (!purchaseOrder) {
+        if (!skid) {
           throw new Error(
-            `Could not find a Customer PO group for input row ${item.sourceRow}.`,
+            `Could not find the merged-dimension group for input row ${item.sourceRow}.`,
           );
         }
 
-        /*
-          Type is based only on Customer PO:
-          - first item for a PO = Order
-          - every later item for that PO = Commodity
-
-          It intentionally does not depend on merged dimensions or weight.
-        */
+        const outputRowNumber = this.layout.firstDataRow + outputRows.length;
         const rowType = purchaseOrder.isFirstItem(item)
           ? "order"
           : "commodity";
@@ -47,12 +51,6 @@ export class OutputRowFactory {
 
         const customerPo = valueOrError(item.customerPo);
         const freightClass = this.freightClassCalculator.calculate(item);
-
-        /*
-          Pallets and Pallet Spaces are based on the physical merged L/W/H
-          group, not the Customer PO. The share for all rows in this skid
-          totals exactly 1.000 to three decimal places.
-        */
         const palletShare = skid.getPalletShareForItem(item, 3);
 
         outputRows.push(
@@ -62,8 +60,7 @@ export class OutputRowFactory {
               sourceLocation: `Input row ${item.sourceRow}`,
             }),
 
-            // Template Target PO# columns B, C, and AN all use the CustomerPO
-            // value from the same input item row.
+            // All three LTL Target PO# columns use this row's CustomerPO.
             customerPo,
             customerPoDuplicate: customerPo,
             customerPoFinal: customerPo,
@@ -77,6 +74,7 @@ export class OutputRowFactory {
                 sourceLocation: "Application default",
               },
             ),
+
             earliestPickupDate: "",
             earliestPickupTime: "",
             latestPickupDate: "",
@@ -102,6 +100,7 @@ export class OutputRowFactory {
             deliveryContactPhone: "",
             deliveryNumber: "",
             destinationSpecialInstructions: "",
+
             itemId: "",
             description: valueOrError(item.oldItemCode),
             packaging: dropdown("packaging", this.defaults.packaging, {
@@ -109,12 +108,9 @@ export class OutputRowFactory {
               sourceLocation: "Application default",
             }),
             quantity: valueOrError(item.quantity),
-
-            // A merged G.W. is split among the actual item rows in its own
-            // source G.W. range.
             totalWeight: valueOrError(item.allocatedWeight),
-
             totalValue: "",
+
             freightClass: isBlank(freightClass)
               ? ""
               : numericWhenPossible(
@@ -123,19 +119,18 @@ export class OutputRowFactory {
                     sourceLocation: `Input row ${item.sourceRow}`,
                   }),
                 ),
+
             temperature: "",
 
+            // This remains based on the item's physical merged L/W/H group,
+            // not on its Customer PO.
             pallets: palletShare,
             palletSpaces: palletShare,
 
             trailerFeet: "",
-
-            // L/W/H values come from the item's physical merged dimension
-            // group and are copied in full to every row in that group.
             length: valueOrError(item.length),
             width: valueOrError(item.width),
             height: valueOrError(item.height),
-
             nmfcNumber: "",
             notes: "",
             sku: valueOrError(item.oldItemCode),
@@ -149,7 +144,25 @@ export class OutputRowFactory {
       });
     });
 
+    console.info("[Fuse Order Template Filler]", {
+      type: "LTL_OUTPUT_GROUPED_BY_CUSTOMER_PO",
+      purchaseOrderCount: shipment.purchaseOrders.length,
+      outputRowCount: outputRows.length,
+    });
+
     return outputRows;
+  }
+
+  createSkidIndex(shipment) {
+    const skidByItem = new Map();
+
+    shipment.skids.forEach((skid) => {
+      skid.items.forEach((item) => {
+        skidByItem.set(item, skid);
+      });
+    });
+
+    return skidByItem;
   }
 }
 

@@ -4,11 +4,27 @@ import { InputShipment } from "../models/InputShipment";
 import { InputSkid } from "../models/InputSkid";
 import { UserFacingError } from "../utils/errors";
 import { ERROR_VALUE, ImportIssueReporter } from "../utils/importIssues";
-import { getCellDisplayValue, isBlank, toFiniteNumber } from "../utils/text";
+import {
+  getCellDisplayValue,
+  isBlank,
+  normalizeText,
+  toFiniteNumber,
+} from "../utils/text";
+
+const ADDITIONAL_PALLET_ERROR_VALUE = "Error: Additional Pallet";
+const ADDITIONAL_PALLET_CONTAINER_VALUE = "additional pallet";
 
 export class InputWorkbookReader {
-  constructor(inputConfig) {
+  constructor(inputConfig, shippingMode) {
     this.config = inputConfig;
+    this.shippingMode = shippingMode;
+    this.modeConfig = inputConfig.modes?.[shippingMode];
+
+    if (!this.modeConfig) {
+      throw new Error(
+        `No input configuration exists for shipping mode "${shippingMode}".`,
+      );
+    }
   }
 
   async readFile(file) {
@@ -47,17 +63,7 @@ export class InputWorkbookReader {
     const merges = worksheet["!merges"] ?? [];
     const range = XLSX.utils.decode_range(usedRange);
     const headerMap = this.findRequiredHeaderColumns(worksheet, range, sheetName);
-
-    /*
-      Dimensions determine the physical pallet/skid group. PO never does.
-      PO is used later only to decide Order vs Commodity.
-    */
     const groupedItems = new Map();
-
-    /*
-      G.W. has its own grouping because its merged range may not be exactly the
-      same as the L/W/H merged range.
-    */
     const weightGroups = new Map();
     let hasReachedData = false;
 
@@ -67,6 +73,13 @@ export class InputWorkbookReader {
       rowIndex += 1
     ) {
       const rowNumber = rowIndex + 1;
+      const container = this.readOptionalHeaderValue(
+        worksheet,
+        headerMap.columns.container,
+        rowNumber,
+        merges,
+      );
+      const isAdditionalPallet = this.isFtl() && this.isAdditionalPallet(container);
 
       const rawOldItemCode = this.readEffectiveValue(
         worksheet,
@@ -81,40 +94,41 @@ export class InputWorkbookReader {
         merges,
       );
 
-      // Ignore completely blank rows. Before item data begins, also ignore
-      // labels/notes that do not contain a quantity.
-      if (isBlank(rawOldItemCode) && isBlank(rawQuantity)) continue;
-      if (!hasReachedData && isBlank(rawQuantity)) continue;
-
+      // Blank rows and pre-data notes are ignored. A marked additional-pallet
+      // row must stay in the output even though its regular item fields can be blank.
+      if (isBlank(rawOldItemCode) && isBlank(rawQuantity) && !isAdditionalPallet) {
+        continue;
+      }
+      if (!hasReachedData && isBlank(rawQuantity) && !isAdditionalPallet) {
+        continue;
+      }
       hasReachedData = true;
 
-      const customerPo = this.valueOrError({
-        value: this.readEffectiveValue(
-          worksheet,
-          headerMap.columns.customerPo,
-          rowNumber,
-          merges,
-        ),
+      const customerPo = this.readRequiredTextValue({
+        worksheet,
+        merges,
         columnIndex: headerMap.columns.customerPo,
         rowNumber,
         field: "Customer PO",
         reporter,
       });
-
-      const oldItemCode = this.valueOrError({
-        value: rawOldItemCode,
+      const oldItemCode = this.readRequiredTextValue({
+        worksheet,
+        merges,
         columnIndex: headerMap.columns.oldItemCode,
         rowNumber,
         field: "Old Item Code",
         reporter,
+        isAdditionalPallet,
       });
-
-      const quantity = this.valueOrError({
-        value: rawQuantity,
+      const quantity = this.readRequiredTextValue({
+        worksheet,
+        merges,
         columnIndex: headerMap.columns.quantity,
         rowNumber,
         field: "Quantity",
         reporter,
+        isAdditionalPallet,
       });
 
       const targetStore = this.readEffectiveValue(
@@ -134,22 +148,54 @@ export class InputWorkbookReader {
           location: targetStoreSourceLocation,
           field: "Target Store",
           message: `Input cell ${targetStoreSourceLocation} is blank.`,
-          resolution: "Destination is a template dropdown, so it will be left blank.",
+          resolution:
+            "Destination is a template dropdown, so it will be left blank. FTL pickup references will use ERROR for the missing Store #.",
         });
       }
 
-      const pickupNumber = this.valueOrError({
-        value: this.readEffectiveValue(
-          worksheet,
-          headerMap.columns.pickupNumber,
-          rowNumber,
-          merges,
-        ),
-        columnIndex: headerMap.columns.pickupNumber,
-        rowNumber,
-        field: "Pickup Number",
-        reporter,
-      });
+      const pickupNumber = this.isLtl()
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.pickupNumber,
+            rowNumber,
+            field: "Pickup Number",
+            reporter,
+          })
+        : "";
+
+      const truckNumber = this.isFtl()
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.truckNumber,
+            rowNumber,
+            field: "Truck #",
+            reporter,
+          })
+        : "";
+
+      const pallet = this.isFtl()
+        ? this.readPositiveNumberOrError({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.pallet,
+            rowNumber,
+            field: "Pallet",
+            reporter,
+          })
+        : "";
+
+      const chinaPo = this.isFtl()
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.chinaPo,
+            rowNumber,
+            field: "China PO",
+            reporter,
+          })
+        : "";
 
       const skidRange = this.findSkidRangeForRow(
         rowIndex,
@@ -157,7 +203,6 @@ export class InputWorkbookReader {
         headerMap.skidGroupingColumnIndexes,
       );
       const skidKey = `${skidRange.startRow}:${skidRange.endRow}`;
-
       const weightRange = this.findWeightRangeForRow(
         rowIndex,
         headerMap.columns.grossWeight,
@@ -173,6 +218,11 @@ export class InputWorkbookReader {
         oldItemCode,
         quantity,
         pickupNumber,
+        truckNumber,
+        pallet,
+        chinaPo,
+        container,
+        isAdditionalPallet,
       });
 
       if (!groupedItems.has(skidKey)) {
@@ -192,7 +242,8 @@ export class InputWorkbookReader {
         location: `${sheetName}!${headerMap.headerRowNumber}:${headerMap.headerRowNumber}`,
         field: "Input item rows",
         message: "No item rows were found below the required input header row.",
-        resolution: "Check that item rows contain values in both Old Item code and QTY.",
+        resolution:
+          "Check that item rows contain values in both Old Item code and QTY, or are marked Additional Pallet in the container column.",
       });
     }
 
@@ -220,32 +271,37 @@ export class InputWorkbookReader {
     return new InputShipment({ skids, issues });
   }
 
-  /*
-    Finds the one row that contains every required header. Header matching is:
-      - exact
-      - case-sensitive
-      - no partial/similar-header matching
+  isLtl() {
+    return this.shippingMode === "LTL";
+  }
 
-    The resulting column indexes are used everywhere else, so deleted or moved
-    input columns do not affect importing.
-  */
+  isFtl() {
+    return this.shippingMode === "FTL";
+  }
+
+  isAdditionalPallet(containerValue) {
+    return normalizeText(containerValue) === ADDITIONAL_PALLET_CONTAINER_VALUE;
+  }
+
   findRequiredHeaderColumns(worksheet, range, sheetName) {
     const configuredHeaders = this.config.headers ?? {};
-    const requiredFields = Object.keys(configuredHeaders);
-    const requiredHeaderTexts = Object.values(configuredHeaders);
+    const requiredFields = this.modeConfig.requiredFields ?? [];
+    const optionalFields = this.modeConfig.optionalFields ?? [];
+    const requiredHeaderTexts = requiredFields.map((field) => configuredHeaders[field]);
 
-    if (requiredFields.length === 0) {
+    if (requiredFields.length === 0 || requiredHeaderTexts.some(isBlank)) {
       this.throwCriticalInputError({
         type: "INPUT_HEADER_CONFIGURATION_ERROR",
         location: "Application configuration",
         field: "Input headers",
-        message: "No required input headers are configured.",
-        resolution: "Add the required exact header names in transformConfig.js.",
+        message: `No complete required-header configuration exists for ${this.shippingMode}.`,
+        resolution: "Add valid field names to input.modes in transformConfig.js.",
       });
     }
 
-    const duplicateConfiguredHeaders = requiredHeaderTexts.filter(
-      (header, index) => requiredHeaderTexts.indexOf(header) !== index,
+    const normalizedRequiredHeaders = requiredHeaderTexts.map(normalizeText);
+    const duplicateConfiguredHeaders = normalizedRequiredHeaders.filter(
+      (header, index) => normalizedRequiredHeaders.indexOf(header) !== index,
     );
 
     if (duplicateConfiguredHeaders.length > 0) {
@@ -254,92 +310,89 @@ export class InputWorkbookReader {
         location: "Application configuration",
         field: "Input headers",
         message:
-          `Each configured input header must be unique. Duplicate values: ` +
-          `${[...new Set(duplicateConfiguredHeaders)].join(", ")}.`,
+          "Each configured input header must be unique after case normalization. " +
+          `Duplicate values: ${[...new Set(duplicateConfiguredHeaders)].join(", ")}.`,
         resolution: "Correct the headers object in transformConfig.js.",
       });
     }
 
+    const trackedFields = [...new Set([...requiredFields, ...optionalFields])];
+    const trackedHeaderKeys = new Set(
+      trackedFields
+        .map((field) => configuredHeaders[field])
+        .filter((header) => !isBlank(header))
+        .map(normalizeText),
+    );
     const matchingColumnsByRow = new Map();
 
     for (let rowIndex = range.s.r; rowIndex <= range.e.r; rowIndex += 1) {
       const matchesForRow = new Map();
 
-      for (
-        let columnIndex = range.s.c;
-        columnIndex <= range.e.c;
-        columnIndex += 1
-      ) {
-        const cell = worksheet[
-          XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })
-        ];
+      for (let columnIndex = range.s.c; columnIndex <= range.e.c; columnIndex += 1) {
+        const cell = worksheet[XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })];
         const cellText = getCellDisplayValue(cell).trim();
+        const headerKey = normalizeText(cellText);
 
-        if (!requiredHeaderTexts.includes(cellText)) continue;
-
-        if (!matchesForRow.has(cellText)) {
-          matchesForRow.set(cellText, []);
-        }
-
-        matchesForRow.get(cellText).push(columnIndex);
+        // Exact header matching is intentional, except capitalization does not matter.
+        if (!trackedHeaderKeys.has(headerKey)) continue;
+        if (!matchesForRow.has(headerKey)) matchesForRow.set(headerKey, []);
+        matchesForRow.get(headerKey).push(columnIndex);
       }
 
-      if (matchesForRow.size > 0) {
-        matchingColumnsByRow.set(rowIndex, matchesForRow);
-      }
+      if (matchesForRow.size > 0) matchingColumnsByRow.set(rowIndex, matchesForRow);
     }
 
     const candidateHeaderRows = Array.from(matchingColumnsByRow.entries())
       .filter(([, matchesForRow]) =>
-        requiredHeaderTexts.every(
-          (headerText) => (matchesForRow.get(headerText) ?? []).length === 1,
+        requiredFields.every(
+          (field) =>
+            (matchesForRow.get(normalizeText(configuredHeaders[field])) ?? []).length === 1,
         ),
       )
       .map(([rowIndex, matchesForRow]) => ({ rowIndex, matchesForRow }));
 
     if (candidateHeaderRows.length === 0) {
-      const foundHeaderLocations = this.describeFoundHeaderLocations(
-        matchingColumnsByRow,
-      );
+      const foundHeaderLocations = this.describeFoundHeaderLocations(matchingColumnsByRow);
 
       this.throwCriticalInputError({
         type: "REQUIRED_INPUT_HEADERS_NOT_FOUND",
         location: sheetName,
         field: "Input headers",
         message:
-          "Could not find one row containing every required exact input header. " +
+          `Could not find one row containing every required case-insensitive exact ${this.shippingMode} input header. ` +
           `Required headers: ${requiredHeaderTexts.join(", ")}. ` +
-          `Found exact header cells: ${foundHeaderLocations || "none"}.`,
+          `Found matching header cells: ${foundHeaderLocations || "none"}.`,
         resolution:
-          "Confirm the input workbook contains all required header names exactly as configured. No similar-header matching is used.",
+          "Confirm the input workbook contains every required header with the same spelling and punctuation. Capitalization does not matter.",
       });
     }
 
     if (candidateHeaderRows.length > 1) {
-      const rowNumbers = candidateHeaderRows
-        .map(({ rowIndex }) => rowIndex + 1)
-        .join(", ");
-
+      const rowNumbers = candidateHeaderRows.map(({ rowIndex }) => rowIndex + 1).join(", ");
       this.throwCriticalInputError({
         type: "AMBIGUOUS_INPUT_HEADER_ROW",
         location: sheetName,
         field: "Input headers",
-        message:
-          `More than one row contains all required exact input headers: rows ${rowNumbers}.`,
-        resolution:
-          "Keep only one complete input-header row in the uploaded worksheet.",
+        message: `More than one row contains all required input headers: rows ${rowNumbers}.`,
+        resolution: "Keep only one complete input-header row in the uploaded worksheet.",
       });
     }
 
     const [{ rowIndex: headerRowIndex, matchesForRow }] = candidateHeaderRows;
     const columns = {};
 
-    requiredFields.forEach((field) => {
-      const headerText = configuredHeaders[field];
-      columns[field] = matchesForRow.get(headerText)[0];
+    trackedFields.forEach((field) => {
+      const configuredHeader = configuredHeaders[field];
+      if (isBlank(configuredHeader)) return;
+
+      const columnIndexes = matchesForRow.get(normalizeText(configuredHeader)) ?? [];
+
+      if (columnIndexes.length === 1) {
+        columns[field] = columnIndexes[0];
+      }
     });
 
-    const skidGroupingColumnIndexes = (this.config.skidGroupingFields ?? [])
+    const skidGroupingColumnIndexes = (this.modeConfig.skidGroupingFields ?? [])
       .map((field) => columns[field])
       .filter((columnIndex) => Number.isInteger(columnIndex));
 
@@ -348,24 +401,20 @@ export class InputWorkbookReader {
         type: "SKID_GROUPING_CONFIGURATION_ERROR",
         location: "Application configuration",
         field: "Skid grouping headers",
-        message:
-          "None of the configured skidGroupingFields resolved to a required input header.",
-        resolution:
-          "Use field keys from input.headers, such as length, width, and height.",
+        message: "None of the configured skidGroupingFields resolved to a required input header.",
+        resolution: "Use field keys from input.headers, such as length, width, and height.",
       });
     }
 
     console.info("[Fuse Order Template Filler]", {
       type: "INPUT_HEADERS_RESOLVED",
+      shippingMode: this.shippingMode,
       worksheet: sheetName,
       headerRow: headerRowIndex + 1,
       headers: Object.fromEntries(
         Object.entries(columns).map(([field, columnIndex]) => [
           field,
-          {
-            header: configuredHeaders[field],
-            column: XLSX.utils.encode_col(columnIndex),
-          },
+          { header: configuredHeaders[field], column: XLSX.utils.encode_col(columnIndex) },
         ]),
       ),
     });
@@ -380,28 +429,21 @@ export class InputWorkbookReader {
 
   describeFoundHeaderLocations(matchingColumnsByRow) {
     const locations = [];
-
     matchingColumnsByRow.forEach((matchesForRow, rowIndex) => {
       matchesForRow.forEach((columnIndexes, headerText) => {
         columnIndexes.forEach((columnIndex) => {
-          locations.push(
-            `${headerText} at ${XLSX.utils.encode_col(columnIndex)}${rowIndex + 1}`,
-          );
+          locations.push(`${headerText} at ${XLSX.utils.encode_col(columnIndex)}${rowIndex + 1}`);
         });
       });
     });
-
     return locations.join("; ");
   }
 
-  allocateItemWeights({
-    worksheet,
-    merges,
-    weightGroups,
-    grossWeightColumnIndex,
-    reporter,
-  }) {
+  allocateItemWeights({ worksheet, merges, weightGroups, grossWeightColumnIndex, reporter }) {
     weightGroups.forEach(({ range: weightRange, items }) => {
+      const isAdditionalPalletGroup = items.length > 0 && items.every(
+        (item) => item.isAdditionalPallet,
+      );
       const totalWeight = this.readPositiveNumberOrError({
         worksheet,
         merges,
@@ -409,12 +451,19 @@ export class InputWorkbookReader {
         rowNumber: weightRange.startRow,
         field: "Gross Weight",
         reporter,
+        isAdditionalPallet: isAdditionalPalletGroup,
       });
-
-      const allocatedWeight =
-        totalWeight === ERROR_VALUE ? ERROR_VALUE : totalWeight / items.length;
+      const grossWeightSourceLocation = this.addressFor(
+        grossWeightColumnIndex,
+        weightRange.startRow,
+      );
+      const allocatedWeight = isErrorValue(totalWeight)
+        ? totalWeight
+        : totalWeight / items.length;
 
       items.forEach((item) => {
+        item.grossWeight = totalWeight;
+        item.grossWeightSourceLocation = grossWeightSourceLocation;
         item.allocatedWeight = allocatedWeight;
       });
 
@@ -433,6 +482,9 @@ export class InputWorkbookReader {
 
   createSkid(worksheet, merges, skidRange, items, reporter, columns) {
     const sourceRow = skidRange.startRow;
+    const isAdditionalPalletGroup = items.length > 0 && items.every(
+      (item) => item.isAdditionalPallet,
+    );
     const length = this.readPositiveNumberOrError({
       worksheet,
       merges,
@@ -440,6 +492,7 @@ export class InputWorkbookReader {
       rowNumber: sourceRow,
       field: "Length",
       reporter,
+      isAdditionalPallet: isAdditionalPalletGroup,
     });
     const width = this.readPositiveNumberOrError({
       worksheet,
@@ -448,6 +501,7 @@ export class InputWorkbookReader {
       rowNumber: sourceRow,
       field: "Width",
       reporter,
+      isAdditionalPallet: isAdditionalPalletGroup,
     });
     const height = this.readPositiveNumberOrError({
       worksheet,
@@ -456,13 +510,9 @@ export class InputWorkbookReader {
       rowNumber: sourceRow,
       field: "Height",
       reporter,
+      isAdditionalPallet: isAdditionalPalletGroup,
     });
 
-    /*
-      Each item keeps the full dimensions of its physical L/W/H merge group.
-      Later PO grouping only affects Type, Pallets, and Pallet Spaces; it must
-      not overwrite dimensions or make all items in a PO share one freight class.
-    */
     items.forEach((item) => {
       item.assignDimensions({
         length,
@@ -490,21 +540,18 @@ export class InputWorkbookReader {
     rowNumber,
     field,
     reporter,
+    isAdditionalPallet = false,
   }) {
-    const rawValue = this.readEffectiveValue(
-      worksheet,
-      columnIndex,
-      rowNumber,
-      merges,
-    );
+    const rawValue = this.readEffectiveValue(worksheet, columnIndex, rowNumber, merges);
     const numericValue = toFiniteNumber(rawValue);
     const location = this.addressFor(columnIndex, rowNumber);
 
-    if (numericValue !== null && numericValue > 0) {
-      return numericValue;
-    }
+    if (numericValue !== null && numericValue > 0) return numericValue;
 
     const missing = isBlank(rawValue);
+    if (missing && isAdditionalPallet) {
+      return this.recordAdditionalPalletValueMissing({ reporter, location, field });
+    }
 
     reporter.record({
       type: missing ? "MISSING_INPUT_VALUE" : "INVALID_NUMERIC_INPUT",
@@ -519,10 +566,22 @@ export class InputWorkbookReader {
     return ERROR_VALUE;
   }
 
-  valueOrError({ value, columnIndex, rowNumber, field, reporter }) {
+  readRequiredTextValue({
+    worksheet,
+    merges,
+    columnIndex,
+    rowNumber,
+    field,
+    reporter,
+    isAdditionalPallet = false,
+  }) {
+    const value = this.readEffectiveValue(worksheet, columnIndex, rowNumber, merges);
     if (!isBlank(value)) return value;
 
     const location = this.addressFor(columnIndex, rowNumber);
+    if (isAdditionalPallet) {
+      return this.recordAdditionalPalletValueMissing({ reporter, location, field });
+    }
 
     reporter.record({
       type: "MISSING_INPUT_VALUE",
@@ -531,8 +590,21 @@ export class InputWorkbookReader {
       message: `Input cell ${location} is blank.`,
       resolution: `The non-dropdown ${field} output cell will receive "ERROR".`,
     });
-
     return ERROR_VALUE;
+  }
+
+  recordAdditionalPalletValueMissing({ reporter, location, field }) {
+    reporter.record({
+      type: "ADDITIONAL_PALLET_SOURCE_VALUE_MISSING",
+      location,
+      field,
+      message:
+        `Input cell ${location} is blank on a row whose container is marked "Additional Pallet".`,
+      resolution:
+        `The applicable non-dropdown output field will receive "${ADDITIONAL_PALLET_ERROR_VALUE}". Freight Class is a dropdown and will be left blank.`,
+    });
+
+    return ADDITIONAL_PALLET_ERROR_VALUE;
   }
 
   findSkidRangeForRow(rowIndex, merges, groupingColumnIndexes) {
@@ -543,20 +615,12 @@ export class InputWorkbookReader {
         const touchesGroupingColumn = groupingColumnIndexes.some(
           (columnIndex) => merge.s.c <= columnIndex && columnIndex <= merge.e.c,
         );
-
         return vertical && containsRow && touchesGroupingColumn;
       })
-      .sort((left, right) => {
-        const leftLength = left.e.r - left.s.r;
-        const rightLength = right.e.r - right.s.r;
-        return rightLength - leftLength;
-      });
+      .sort((left, right) => (right.e.r - right.s.r) - (left.e.r - left.s.r));
 
     const bestRange = matchingRanges[0];
-
-    if (!bestRange) {
-      return { startRow: rowIndex + 1, endRow: rowIndex + 1 };
-    }
+    if (!bestRange) return { startRow: rowIndex + 1, endRow: rowIndex + 1 };
 
     return { startRow: bestRange.s.r + 1, endRow: bestRange.e.r + 1 };
   }
@@ -566,18 +630,12 @@ export class InputWorkbookReader {
       const vertical = merge.e.r > merge.s.r;
       const containsRow = merge.s.r <= rowIndex && rowIndex <= merge.e.r;
       const touchesGrossWeightColumn =
-        merge.s.c <= grossWeightColumnIndex &&
-        grossWeightColumnIndex <= merge.e.c;
-
+        merge.s.c <= grossWeightColumnIndex && grossWeightColumnIndex <= merge.e.c;
       return vertical && containsRow && touchesGrossWeightColumn;
     });
 
     if (!matchingMerge) {
-      return {
-        startRow: rowIndex + 1,
-        endRow: rowIndex + 1,
-        isMerged: false,
-      };
+      return { startRow: rowIndex + 1, endRow: rowIndex + 1, isMerged: false };
     }
 
     return {
@@ -587,25 +645,20 @@ export class InputWorkbookReader {
     };
   }
 
-  readEffectiveValue(worksheet, columnIndex, rowNumber, merges) {
-    const cell = this.readEffectiveCell(
-      worksheet,
-      columnIndex,
-      rowNumber,
-      merges,
-    );
+  readOptionalHeaderValue(worksheet, columnIndex, rowNumber, merges) {
+    if (!Number.isInteger(columnIndex)) return "";
+    return this.readEffectiveValue(worksheet, columnIndex, rowNumber, merges);
+  }
 
-    // .v preserves raw values such as Z. .w is only a formatted-text fallback.
+  readEffectiveValue(worksheet, columnIndex, rowNumber, merges) {
+    const cell = this.readEffectiveCell(worksheet, columnIndex, rowNumber, merges);
     return cell?.v ?? cell?.w ?? "";
   }
 
   readEffectiveCell(worksheet, columnIndex, rowNumber, merges) {
     const address = this.addressFor(columnIndex, rowNumber);
     const directCell = worksheet[address];
-
-    if (!isBlank(getCellDisplayValue(directCell))) {
-      return directCell;
-    }
+    if (!isBlank(getCellDisplayValue(directCell))) return directCell;
 
     const coordinate = XLSX.utils.decode_cell(address);
     const merge = merges.find(
@@ -616,9 +669,7 @@ export class InputWorkbookReader {
         coordinate.r <= candidate.e.r,
     );
 
-    if (!merge) return directCell;
-
-    return worksheet[XLSX.utils.encode_cell(merge.s)] ?? directCell;
+    return merge ? worksheet[XLSX.utils.encode_cell(merge.s)] ?? directCell : directCell;
   }
 
   addressFor(columnIndex, rowNumber) {
@@ -633,11 +684,14 @@ export class InputWorkbookReader {
       message,
       resolution,
     });
-
     throw new UserFacingError(message);
   }
 }
 
 function displayText(value) {
   return String(value ?? "").trim();
+}
+
+function isErrorValue(value) {
+  return value === ERROR_VALUE || value === ADDITIONAL_PALLET_ERROR_VALUE;
 }

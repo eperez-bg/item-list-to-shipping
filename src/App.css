@@ -6,7 +6,7 @@
 
 .hero {
   max-width: 760px;
-  margin-bottom: 28px;
+  margin-bottom: 20px;
 }
 
 .hero h1 {
@@ -30,6 +30,55 @@
   text-transform: uppercase;
 }
 
+.shippingModeSection {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 20px 0 28px;
+}
+
+.shippingModeLabel {
+  color: #334155;
+  font-weight: 800;
+}
+
+.shippingModeToggle {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid #94a3b8;
+  border-radius: 10px;
+  background: #f8fafc;
+}
+
+.shippingModeButton {
+  min-width: 92px;
+  padding: 9px 18px;
+  border: 0;
+  background: transparent;
+  color: #475569;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 800;
+}
+
+.shippingModeButton + .shippingModeButton {
+  border-left: 1px solid #94a3b8;
+}
+
+.shippingModeButton:hover:not(:disabled) {
+  background: #e2e8f0;
+}
+
+.shippingModeButton:disabled {
+  cursor: progress;
+}
+
+.shippingModeButtonActive,
+.shippingModeButtonActive:hover:not(:disabled) {
+  background: #1d4ed8;
+  color: white;
+}
+
 .dropZone {
   display: grid;
   place-items: center;
@@ -48,8 +97,21 @@
 
 .dropZone span,
 .fileName,
-.status {
+.status,
+.modeHint {
   color: #475569;
+}
+
+.modeHint {
+  margin: 12px 0 0;
+  font-size: 0.92rem;
+}
+
+.modeHint code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  color: #0f172a;
 }
 
 .primaryButton,
@@ -147,6 +209,19 @@ tr:last-child td {
   .appShell {
     width: min(100% - 24px, 1180px);
     padding-top: 28px;
+  }
+
+  .shippingModeSection {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .shippingModeToggle {
+    width: 100%;
+  }
+
+  .shippingModeButton {
+    flex: 1;
   }
 
   .previewHeader {

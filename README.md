@@ -1,16 +1,17 @@
-# React + Vite
+# Version 12 — case-insensitive headers and Additional Pallet rows
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Replace these files in the React project:
 
-Currently, two official plugins are available:
+- `src/config/transformConfig.js`
+- `src/models/InputItem.js`
+- `src/services/InputWorkbookReader.js`
+- `src/App.jsx`
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Changes
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+- All input-header matching is **case-insensitive but otherwise exact**. For example, `CustomerPO`, `customerpo`, and `CUSTOMERPO` are accepted. `Customer PO` is still a different header because spacing/punctuation are not treated as equivalent.
+- The `container` input header is optional and is read case-insensitively.
+- In **FTL**, a row whose `container` value is `additional pallet` in any capitalization is retained even when `Old Item code` and `QTY` are blank.
+- On an Additional Pallet row, blank `Old Item code`, `QTY`, `L"`, `W"`, `H"`, or `G.W. (LBS)` values become `Error: Additional Pallet` in non-dropdown output fields.
+- Freight Class stays blank when it cannot be calculated, because it is a dropdown field.
+- Normal rows retain the previous behavior: missing required source values log errors and produce `ERROR` as appropriate.
