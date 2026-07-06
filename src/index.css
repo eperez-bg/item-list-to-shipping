@@ -1,3 +1,24 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║ FILE: index.css                                                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║ RESPONSIBILITY                                                             ║
+ * ║ Defines visual styling, component layout, and responsive behavior for      ║
+ * ║ the application interface.                                                 ║
+ * ║                                                                            ║
+ * ║ WHY THIS FILE EXISTS                                                       ║
+ * ║ Keeping presentation rules here lets React components focus on state,      ║
+ * ║ spreadsheet behavior, and download actions rather than CSS details.        ║
+ * ║                                                                            ║
+ * ║ MAIN CLASSES / FUNCTIONS                                                   ║
+ * ║ • Global Defaults — establishes the neutral typography and page            ║
+ * ║ background for the app.                                                    ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
+/* ── Global Defaults ─────────────────────────────────────────
+   establishes the neutral typography and page background for the app.
+   ─────────────────────────────────────────────────────────────────────── */
 :root {
   color: #0f172a;
   background: #ffffff;

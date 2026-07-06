@@ -1,6 +1,60 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║ FILE: InputItem.js                                                         ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║ RESPONSIBILITY                                                             ║
+ * ║ Defines the normalized in-memory record for one input row after it has     ║
+ * ║ been read from Excel.                                                      ║
+ * ║                                                                            ║
+ * ║ WHY THIS FILE EXISTS                                                       ║
+ * ║ A single source row has many related values, and a model keeps             ║
+ * ║ downstream services from passing loose, error-prone objects.               ║
+ * ║                                                                            ║
+ * ║ MAIN CLASSES / FUNCTIONS                                                   ║
+ * ║ • InputItem — A single source row has many related values, and a model     ║
+ * ║ keeps downstream services from passing loose, error-prone objects.         ║
+ * ║ • assignDimensions — Merged L/W/H values are discovered after the          ║
+ * ║ initial item rows are read, so the item needs a dedicated update step.     ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
 import { ERROR_VALUE } from "../utils/importIssues";
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ CLASS: InputItem                                                           │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • Constructor options describing one source row.
+ *
+ * Returns
+ *   • Instances used by group, freight, and output services.
+ *
+ * Why / How
+ *   A single source row has many related values, and a model keeps
+ *   downstream services from passing loose, error-prone objects.
+ *   The class stores source provenance, mode-specific values, merged
+ *   dimensions, and allocated weight in one place.
+ */
 export class InputItem {
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ CONSTRUCTOR: constructor                                                   │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • Named properties from InputWorkbookReader.
+   *
+   * Returns
+   *   • A configured InputItem instance.
+   *
+   * Why / How
+   *   Every later step needs a consistent normalized representation of one
+   *   source item.
+   *   It copies the parsed values and uses sensible defaults for mode-specific
+   *   or missing fields.
+   */
   constructor({
     sourceRow,
     customerPo,
@@ -56,6 +110,23 @@ export class InputItem {
     this.dimensionSourceEndRow = dimensionSourceEndRow;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: assignDimensions                                                   │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • Shared dimensions and their start/end source rows.
+   *
+   * Returns
+   *   • No returned value; updates this item's dimension fields.
+   *
+   * Why / How
+   *   Merged L/W/H values are discovered after the initial item rows are read,
+   *   so the item needs a dedicated update step.
+   *   It copies the shared dimensions and records the source row range that
+   *   supplied them.
+   */
   assignDimensions({
     length,
     width,

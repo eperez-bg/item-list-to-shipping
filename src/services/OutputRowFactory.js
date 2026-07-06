@@ -1,16 +1,66 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║ FILE: OutputRowFactory.js                                                  ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║ RESPONSIBILITY                                                             ║
+ * ║ Builds output rows for the LTL template using Customer PO grouping while   ║
+ * ║ retaining physical merged-cell rules for pallet shares.                    ║
+ * ║                                                                            ║
+ * ║ WHY THIS FILE EXISTS                                                       ║
+ * ║ LTL has its own PO-based grouping rules, while template field assembly     ║
+ * ║ should stay separate from UI and XML code.                                 ║
+ * ║                                                                            ║
+ * ║ MAIN CLASSES / FUNCTIONS                                                   ║
+ * ║ • OutputRowFactory — LTL has its own PO-based grouping rules, while        ║
+ * ║ template field assembly should stay separate from UI and XML code.         ║
+ * ║ • build — The downloaded LTL worksheet must group all same-PO rows         ║
+ * ║ together even when their items came from different merged-cell groups.     ║
+ * ║ • createSkidIndex — PO grouping controls row order, but pallet shares      ║
+ * ║ still depend on the physical L/W/H group.                                  ║
+ * ║ • valueOrError — Normal output cells should make a missing source value    ║
+ * ║ visible rather than silently sending an empty value.                       ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
 import { OutputLoadRow } from "../models/OutputLoadRow";
 import { ERROR_VALUE } from "../utils/importIssues";
 import { isBlank, numericWhenPossible } from "../utils/text";
 
-/*
-  LTL output factory.
-
-  The completed template is grouped by Customer PO in first-appearance order:
-  every PO's Order row is immediately followed by its Commodity rows.
-
-  Physical merged L/W/H groups are still used only for Pallets / Pallet Spaces.
-*/
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ CLASS: OutputRowFactory                                                    │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • Constructor dependencies for layout, dropdowns, freight, and defaults.
+ *
+ * Returns
+ *   • A reusable LTL output row factory.
+ *
+ * Why / How
+ *   LTL has its own PO-based grouping rules, while template field assembly
+ *   should stay separate from UI and XML code.
+ *   It walks PO groups in first-appearance order and maps every item into an
+ *   OutputLoadRow using shared dropdown and freight services.
+ */
 export class OutputRowFactory {
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ CONSTRUCTOR: constructor                                                   │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • Required service dependencies.
+   *
+   * Returns
+   *   • A configured OutputRowFactory.
+   *
+   * Why / How
+   *   LTL row creation depends on several collaborators, which are injected to
+   *   keep the factory testable and focused.
+   *   It saves the layout, validation service, freight calculator, and static
+   *   defaults.
+   */
   constructor({ layout, dropdownService, freightClassCalculator, defaults }) {
     this.layout = layout;
     this.dropdownService = dropdownService;
@@ -18,6 +68,24 @@ export class OutputRowFactory {
     this.defaults = defaults;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: build                                                              │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • shipment: parsed InputShipment.
+   *
+   * Returns
+   *   • Ordered array of OutputLoadRow instances for the LTL template.
+   *
+   * Why / How
+   *   The downloaded LTL worksheet must group all same-PO rows together even
+   *   when their items came from different merged-cell groups.
+   *   It builds a skid lookup, walks PO groups in source-order, determines
+   *   Order/Commodity, calculates freight/pallet fields, and creates
+   *   OutputLoadRows.
+   */
   build(shipment) {
     const outputRows = [];
     const skidByItem = this.createSkidIndex(shipment);
@@ -153,6 +221,22 @@ export class OutputRowFactory {
     return outputRows;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: createSkidIndex                                                    │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • shipment: InputShipment.
+   *
+   * Returns
+   *   • Map<InputItem, InputSkid>.
+   *
+   * Why / How
+   *   PO grouping controls row order, but pallet shares still depend on the
+   *   physical L/W/H group.
+   *   It builds a Map from each item to its InputSkid.
+   */
   createSkidIndex(shipment) {
     const skidByItem = new Map();
 
@@ -166,6 +250,22 @@ export class OutputRowFactory {
   }
 }
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: valueOrError                                                     │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • value: any source/output value.
+ *
+ * Returns
+ *   • Original value or ERROR_VALUE.
+ *
+ * Why / How
+ *   Normal output cells should make a missing source value visible rather
+ *   than silently sending an empty value.
+ *   It returns the value when present or the shared ERROR marker when blank.
+ */
 function valueOrError(value) {
   return isBlank(value) ? ERROR_VALUE : value;
 }

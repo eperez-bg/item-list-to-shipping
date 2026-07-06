@@ -1,8 +1,77 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║ FILE: TemplateWorksheetPatcher.js                                          ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║ RESPONSIBILITY                                                             ║
+ * ║ Safely writes output values into an in-memory copy of worksheet XML        ║
+ * ║ while preserving styles and extending dropdown validation ranges.          ║
+ * ║                                                                            ║
+ * ║ WHY THIS FILE EXISTS                                                       ║
+ * ║ Re-saving a workbook through a general library can lose template           ║
+ * ║ features; patching the existing sheet XML preserves its styles and         ║
+ * ║ validation metadata.                                                       ║
+ * ║                                                                            ║
+ * ║ MAIN CLASSES / FUNCTIONS                                                   ║
+ * ║ • TemplateWorksheetPatcher — Re-saving a workbook through a general        ║
+ * ║ library can lose template features; patching the existing sheet XML        ║
+ * ║ preserves its styles and validation metadata.                              ║
+ * ║ • createFilledWorkbookBlob — This is the final non-mutating write step     ║
+ * ║ that turns logical output rows into a downloadable workbook copy.          ║
+ * ║ • getStyleByColumn — Newly created cells should look like the template     ║
+ * ║ instead of appearing unformatted.                                          ║
+ * ║ • getOrCreateRow — Output can need more rows than the template already     ║
+ * ║ contains.                                                                  ║
+ * ║ • getOrCreateCell — Each mapped output field needs a cell even when the    ║
+ * ║ template did not already contain that specific coordinate.                 ║
+ * ║ • setCellValue — Old formulas/values must be cleared before writing a      ║
+ * ║ new output value, and Excel needs different XML for numbers versus text.   ║
+ * ║ • extendDataValidations — Generated rows must keep template dropdowns      ║
+ * ║ even beyond the template's original preformatted range.                    ║
+ * ║ • expandDimension — Excel worksheet bounds must include newly written      ║
+ * ║ rows/columns so applications recognize them reliably.                      ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
 import * as XLSX from "xlsx";
 import { extendSqrefThroughRow } from "../utils/a1";
 import { createElementLike, elementChildren, firstDescendant, parseXml } from "../utils/xml";
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ CLASS: TemplateWorksheetPatcher                                            │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • Template ZIP, worksheet path, layout, and completed output rows.
+ *
+ * Returns
+ *   • A reusable safe worksheet patcher.
+ *
+ * Why / How
+ *   Re-saving a workbook through a general library can lose template
+ *   features; patching the existing sheet XML preserves its styles and
+ *   validation metadata.
+ *   It edits only the selected worksheet inside the template ZIP, reuses
+ *   styles, writes values, extends validations, and returns a new Blob.
+ */
 export class TemplateWorksheetPatcher {
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: createFilledWorkbookBlob                                           │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • ZIP, XML path, TemplateLayout, output row models.
+   *
+   * Returns
+   *   • Promise<Blob> for download.
+   *
+   * Why / How
+   *   This is the final non-mutating write step that turns logical output rows
+   *   into a downloadable workbook copy.
+   *   It parses XML, clears/writes mapped cells, preserves styles, extends
+   *   dropdown coverage, expands worksheet bounds, and regenerates the ZIP.
+   */
   async createFilledWorkbookBlob({ zip, worksheetXmlPath, layout, outputRows }) {
     const worksheetFile = zip.file(worksheetXmlPath);
     if (!worksheetFile) {
@@ -50,6 +119,23 @@ export class TemplateWorksheetPatcher {
     });
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getStyleByColumn                                                   │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • sheetData XML node and layout.
+   *
+   * Returns
+   *   • Map from column index to Excel style index.
+   *
+   * Why / How
+   *   Newly created cells should look like the template instead of appearing
+   *   unformatted.
+   *   It finds the first styled existing data cell for each mapped column and
+   *   caches its style index.
+   */
   getStyleByColumn(sheetData, layout) {
     const styles = new Map();
     const rows = elementChildren(sheetData, "row");
@@ -76,6 +162,21 @@ export class TemplateWorksheetPatcher {
     return styles;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getOrCreateRow                                                     │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • XML document, sheetData node, 1-based row number.
+   *
+   * Returns
+   *   • Row XML element.
+   *
+   * Why / How
+   *   Output can need more rows than the template already contains.
+   *   It returns an existing row or inserts a new row in numerical order.
+   */
   getOrCreateRow(xmlDocument, sheetData, rowNumber) {
     const existingRow = elementChildren(sheetData, "row").find(
       (row) => Number(row.getAttribute("r")) === rowNumber,
@@ -93,6 +194,23 @@ export class TemplateWorksheetPatcher {
     return row;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getOrCreateCell                                                    │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • XML document, row node, A1 address, optional style index.
+   *
+   * Returns
+   *   • Cell XML element.
+   *
+   * Why / How
+   *   Each mapped output field needs a cell even when the template did not
+   *   already contain that specific coordinate.
+   *   It returns an existing cell or creates one in column order and applies
+   *   the copied style.
+   */
   getOrCreateCell(xmlDocument, row, cellAddress, styleIndex) {
     const existingCell = elementChildren(row, "c").find(
       (cell) => cell.getAttribute("r") === cellAddress,
@@ -112,6 +230,23 @@ export class TemplateWorksheetPatcher {
     return cell;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: setCellValue                                                       │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • XML document, cell element, output value.
+   *
+   * Returns
+   *   • No returned value; mutates the cell XML.
+   *
+   * Why / How
+   *   Old formulas/values must be cleared before writing a new output value,
+   *   and Excel needs different XML for numbers versus text.
+   *   It removes existing content, writes numeric values as v nodes, and
+   *   writes strings as inlineStr while preserving edge whitespace.
+   */
   setCellValue(xmlDocument, cell, value) {
     elementChildren(cell, "f").forEach((node) => node.remove());
     elementChildren(cell, "v").forEach((node) => node.remove());
@@ -141,6 +276,23 @@ export class TemplateWorksheetPatcher {
     cell.appendChild(inlineString);
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: extendDataValidations                                              │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • Worksheet XML, first data row, final output row.
+   *
+   * Returns
+   *   • No returned value; mutates validation sqrefs.
+   *
+   * Why / How
+   *   Generated rows must keep template dropdowns even beyond the template's
+   *   original preformatted range.
+   *   It expands each data-validation sqref that includes the first data row
+   *   through the last output row.
+   */
   extendDataValidations(xmlDocument, firstDataRow, lastOutputRow) {
     if (lastOutputRow < firstDataRow) return;
 
@@ -157,6 +309,23 @@ export class TemplateWorksheetPatcher {
       });
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: expandDimension                                                    │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • Worksheet XML, final row, last mapped column.
+   *
+   * Returns
+   *   • No returned value; mutates the dimension range.
+   *
+   * Why / How
+   *   Excel worksheet bounds must include newly written rows/columns so
+   *   applications recognize them reliably.
+   *   It decodes the current dimension, extends its end row/column, and writes
+   *   it back.
+   */
   expandDimension(xmlDocument, lastOutputRow, lastColumnIndex) {
     const dimension = firstDescendant(xmlDocument, "dimension");
     if (!dimension || lastOutputRow < 1) return;

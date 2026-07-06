@@ -1,13 +1,33 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <!--
+      ========================================================================
+      FILE: index.html
+      ========================================================================
+      RESPONSIBILITY
+      Provides the single HTML document Vite serves before the React app mounts.
+
+      WHY THIS FILE EXISTS
+      React needs one permanent root element. Vite starts src/main.jsx, which
+      renders the visible application inside #root.
+
+      MAIN ELEMENTS
+      • <head>        document metadata, title, responsive viewport, favicon
+      • #root         permanent mount point for React
+      • module script  Vite/React entry module
+      ========================================================================
+    -->
     <meta charset="UTF-8" />
+    <!-- Preserve the existing Vite favicon asset reference. -->
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>item-list-to-shipping</title>
   </head>
   <body>
+    <!-- WHY: React needs one stable DOM node as its mounting target. -->
     <div id="root"></div>
+    <!-- HOW: Vite resolves this module and starts src/main.jsx in development and production. -->
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

@@ -1,14 +1,69 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║ FILE: FtlOutputRowFactory.js                                               ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║ RESPONSIBILITY                                                             ║
+ * ║ Builds output rows for the FTL template using Truck # grouping and         ║
+ * ║ FTL-specific pickup, weight, and pallet rules.                             ║
+ * ║                                                                            ║
+ * ║ WHY THIS FILE EXISTS                                                       ║
+ * ║ FTL template rules differ from LTL: grouping, pickup reference, weights,   ║
+ * ║ and pallet fields are truck-based.                                         ║
+ * ║                                                                            ║
+ * ║ MAIN CLASSES / FUNCTIONS                                                   ║
+ * ║ • FtlOutputRowFactory — FTL template rules differ from LTL: grouping,      ║
+ * ║ pickup reference, weights, and pallet fields are truck-based.              ║
+ * ║ • build — The FTL output must place one Order row followed immediately     ║
+ * ║ by all Commodity rows for each Truck #.                                    ║
+ * ║ • buildPickupReference — FTL uses the same composite value in both         ║
+ * ║ Pickup Number and Primary Number, so it should be built once               ║
+ * ║ consistently.                                                              ║
+ * ║ • getTruckPalletCountOrError — Only the FTL Order row should receive a     ║
+ * ║ truck pallet total, and missing totals need a logged visible error.        ║
+ * ║ • valueOrError — Required non-dropdown FTL fields should visibly report    ║
+ * ║ missing source data.                                                       ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
 import { OutputLoadRow } from "../models/OutputLoadRow";
 import { ERROR_VALUE } from "../utils/importIssues";
 import { isBlank, numericWhenPossible } from "../utils/text";
 
-/*
-  FTL output factory.
-
-  The completed template is grouped by Truck # in first-appearance order:
-  every Truck's Order row is immediately followed by its Commodity rows.
-*/
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ CLASS: FtlOutputRowFactory                                                 │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • Constructor dependencies for layout, dropdowns, freight, defaults, and
+ *   • issue reporting.
+ *
+ * Returns
+ *   • A reusable FTL output row factory.
+ *
+ * Why / How
+ *   FTL template rules differ from LTL: grouping, pickup reference, weights,
+ *   and pallet fields are truck-based.
+ *   It walks Truck # groups and creates rows with FTL-specific values while
+ *   reusing shared dropdown and freight services.
+ */
 export class FtlOutputRowFactory {
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ CONSTRUCTOR: constructor                                                   │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • Named dependencies from TemplateWorkbookService.
+   *
+   * Returns
+   *   • A configured FtlOutputRowFactory.
+   *
+   * Why / How
+   *   FTL assembly requires configuration and services but should not directly
+   *   construct them itself.
+   *   It stores the injected dependencies for use during build.
+   */
   constructor({
     layout,
     dropdownService,
@@ -23,6 +78,23 @@ export class FtlOutputRowFactory {
     this.issueReporter = issueReporter;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: build                                                              │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • shipment: parsed InputShipment.
+   *
+   * Returns
+   *   • Ordered array of OutputLoadRow instances for the FTL template.
+   *
+   * Why / How
+   *   The FTL output must place one Order row followed immediately by all
+   *   Commodity rows for each Truck #.
+   *   It walks source-order truck groups, calculates FTL-only fields, resolves
+   *   dropdowns, and creates OutputLoadRows.
+   */
   build(shipment) {
     const outputRows = [];
 
@@ -153,6 +225,24 @@ export class FtlOutputRowFactory {
     return outputRows;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: buildPickupReference                                               │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • item: InputItem.
+   *
+   * Returns
+   *   • String in the required "{Store #} Truck {Truck #} ({China PO})"
+   *   • format.
+   *
+   * Why / How
+   *   FTL uses the same composite value in both Pickup Number and Primary
+   *   Number, so it should be built once consistently.
+   *   It combines Store #, Truck #, and China PO; missing pieces become
+   *   visible ERROR markers.
+   */
   buildPickupReference(item) {
     const storeNumber = valueOrError(item.targetStore);
     const truckNumber = valueOrError(item.truckNumber);
@@ -161,6 +251,23 @@ export class FtlOutputRowFactory {
     return `${storeNumber} Truck ${truckNumber} (${chinaPo})`;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getTruckPalletCountOrError                                         │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • truck: Truckload; item: Order-row InputItem.
+   *
+   * Returns
+   *   • Positive pallet count or ERROR_VALUE.
+   *
+   * Why / How
+   *   Only the FTL Order row should receive a truck pallet total, and missing
+   *   totals need a logged visible error.
+   *   It asks Truckload for its greatest usable pallet count and records an
+   *   issue if no positive value exists.
+   */
   getTruckPalletCountOrError(truck, item) {
     const palletCount = truck.getGreatestPalletCount();
 
@@ -183,6 +290,22 @@ export class FtlOutputRowFactory {
   }
 }
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: valueOrError                                                     │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • value: any source/output value.
+ *
+ * Returns
+ *   • Original value or ERROR_VALUE.
+ *
+ * Why / How
+ *   Required non-dropdown FTL fields should visibly report missing source
+ *   data.
+ *   It returns a present value or the shared ERROR marker.
+ */
 function valueOrError(value) {
   return isBlank(value) ? ERROR_VALUE : value;
 }

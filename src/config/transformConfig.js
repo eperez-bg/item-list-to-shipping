@@ -1,3 +1,18 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║ FILE: transformConfig.js                                                   ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║ RESPONSIBILITY                                                             ║
+ * ║ Centralizes the fixed business rules, header names, template locations,    ║
+ * ║ defaults, and field-to-template mappings for both shipping modes.          ║
+ * ║                                                                            ║
+ * ║ WHY THIS FILE EXISTS                                                       ║
+ * ║ Keeping this responsibility in one focused file makes the spreadsheet      ║
+ * ║ workflow easier to understand, change, and test without affecting          ║
+ * ║ unrelated code.                                                            ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
 export const SHIPPING_MODES = Object.freeze({
   LTL: "LTL",
   FTL: "FTL",

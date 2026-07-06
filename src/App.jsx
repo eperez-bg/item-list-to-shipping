@@ -1,3 +1,38 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║ FILE: App.jsx                                                              ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║ RESPONSIBILITY                                                             ║
+ * ║ Defines the React screen and coordinates file upload, the LTL/FTL mode     ║
+ * ║ toggle, preview data, and template downloads.                              ║
+ * ║                                                                            ║
+ * ║ WHY THIS FILE EXISTS                                                       ║
+ * ║ It is the composition root for the visible application, so UI state and    ║
+ * ║ service creation stay in one place.                                        ║
+ * ║                                                                            ║
+ * ║ MAIN CLASSES / FUNCTIONS                                                   ║
+ * ║ • App — It is the composition root for the visible application, so UI      ║
+ * ║ state and service creation stay in one place.                              ║
+ * ║ • selectShippingMode — Changing modes changes both parsing rules and       ║
+ * ║ output templates, so old parsed data must not be reused accidentally.      ║
+ * ║ • loadSourceFile — The UI needs one controlled path for validating and     ║
+ * ║ parsing uploads so all errors are shown consistently.                      ║
+ * ║ • generateTemplate — Generating a workbook touches several services and    ║
+ * ║ can fail, so it is kept behind one button handler with status updates.     ║
+ * ║ • onDrop — Drag-and-drop needs to prevent the browser's default            ║
+ * ║ file-opening behavior before using the dropped file.                       ║
+ * ║ • buildPreviewRows — The preview should mirror the ordering and            ║
+ * ║ calculations used by the downloaded workbook so users can spot issues      ║
+ * ║ early.                                                                     ║
+ * ║ • createSkidIndex — LTL preview generation needs quick access from each    ║
+ * ║ item to its physical merged-dimension group.                               ║
+ * ║ • previewDescription — The UI should explain the grouping rule that the    ║
+ * ║ currently selected mode will apply.                                        ║
+ * ║ • formatPreviewValue — Raw floating-point values are difficult to scan,    ║
+ * ║ especially for weights and fractional pallet shares.                       ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
 import { useMemo, useState } from "react";
 import {
   APP_CONFIG,
@@ -10,6 +45,23 @@ import { downloadBlob } from "./utils/download";
 import { formatNumber } from "./utils/text";
 import "./App.css";
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: App                                                              │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • None; React calls the component.
+ *
+ * Returns
+ *   • React JSX for the full application screen.
+ *
+ * Why / How
+ *   It is the composition root for the visible application, so UI state and
+ *   service creation stay in one place.
+ *   It stores the active mode, file, parsed shipment, status, and busy
+ *   state; then renders the appropriate controls and preview.
+ */
 function App() {
   const [shippingMode, setShippingMode] = useState(SHIPPING_MODES.LTL);
   const [sourceFile, setSourceFile] = useState(null);
@@ -32,6 +84,23 @@ function App() {
     };
   }, [shippingMode]);
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ FUNCTION: selectShippingMode                                               │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • nextMode: the requested LTL or FTL mode.
+   *
+   * Returns
+   *   • No returned value; React state is reset for the new mode.
+   *
+   * Why / How
+   *   Changing modes changes both parsing rules and output templates, so old
+   *   parsed data must not be reused accidentally.
+   *   It updates the mode and clears the selected file, shipment, status, and
+   *   error state.
+   */
   function selectShippingMode(nextMode) {
     if (nextMode === shippingMode) return;
 
@@ -43,6 +112,23 @@ function App() {
     setStatus("");
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ FUNCTION: loadSourceFile                                                   │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • file: a browser File selected or dropped by the user.
+   *
+   * Returns
+   *   • A Promise that resolves after React state reflects the parsing result.
+   *
+   * Why / How
+   *   The UI needs one controlled path for validating and parsing uploads so
+   *   all errors are shown consistently.
+   *   It validates the extension, calls the active InputWorkbookReader, then
+   *   stores either the parsed shipment or a user-facing error.
+   */
   async function loadSourceFile(file) {
     if (!file) return;
 
@@ -87,6 +173,24 @@ function App() {
     }
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ FUNCTION: generateTemplate                                                 │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • None; uses the currently parsed shipment and active mode.
+   *
+   * Returns
+   *   • A Promise that resolves after the download begins or an error is
+   *   • displayed.
+   *
+   * Why / How
+   *   Generating a workbook touches several services and can fail, so it is
+   *   kept behind one button handler with status updates.
+   *   It asks the active TemplateWorkbookService to create a Blob, then
+   *   delegates the browser download to downloadBlob.
+   */
   async function generateTemplate() {
     if (!shipment || !sourceFile) return;
 
@@ -117,6 +221,23 @@ function App() {
     }
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ FUNCTION: onDrop                                                           │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • event: a React drag event.
+   *
+   * Returns
+   *   • No returned value; starts asynchronous file loading.
+   *
+   * Why / How
+   *   Drag-and-drop needs to prevent the browser's default file-opening
+   *   behavior before using the dropped file.
+   *   It cancels the default event and passes the first dropped file into the
+   *   same upload flow used by the file picker.
+   */
   function onDrop(event) {
     event.preventDefault();
     void loadSourceFile(event.dataTransfer.files?.[0]);
@@ -280,6 +401,23 @@ function App() {
   );
 }
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: buildPreviewRows                                                 │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • shipment: parsed InputShipment; shippingMode: LTL or FTL.
+ *
+ * Returns
+ *   • An array of simple objects used by the preview table.
+ *
+ * Why / How
+ *   The preview should mirror the ordering and calculations used by the
+ *   downloaded workbook so users can spot issues early.
+ *   It chooses truck groups for FTL or PO groups plus a skid index for LTL,
+ *   then produces display-ready row objects.
+ */
 function buildPreviewRows(shipment, shippingMode) {
   if (shippingMode === SHIPPING_MODES.FTL) {
     return shipment.trucks.flatMap((truck) =>
@@ -322,6 +460,23 @@ function buildPreviewRows(shipment, shippingMode) {
   );
 }
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: createSkidIndex                                                  │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • shipment: parsed InputShipment.
+ *
+ * Returns
+ *   • Map<InputItem, InputSkid>.
+ *
+ * Why / How
+ *   LTL preview generation needs quick access from each item to its physical
+ *   merged-dimension group.
+ *   It walks every skid once and stores each item as a key in a Map pointing
+ *   to its skid.
+ */
 function createSkidIndex(shipment) {
   const skidByItem = new Map();
 
@@ -334,12 +489,45 @@ function createSkidIndex(shipment) {
   return skidByItem;
 }
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: previewDescription                                               │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • shippingMode: LTL or FTL.
+ *
+ * Returns
+ *   • A short explanatory string.
+ *
+ * Why / How
+ *   The UI should explain the grouping rule that the currently selected mode
+ *   will apply.
+ *   It returns one fixed description for LTL and another for FTL.
+ */
 function previewDescription(shippingMode) {
   return shippingMode === SHIPPING_MODES.FTL
     ? "Preview and download are grouped by Truck #: each Order row is followed immediately by every Commodity row in that truck."
     : "Preview and download are grouped by Customer PO: each Order row is followed immediately by every Commodity row for that PO. Pallet shares still use merged-dimension groups.";
 }
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: formatPreviewValue                                               │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • value: preview value; digits: maximum decimals.
+ *
+ * Returns
+ *   • A display-friendly string or original value.
+ *
+ * Why / How
+ *   Raw floating-point values are difficult to scan, especially for weights
+ *   and fractional pallet shares.
+ *   It formats numbers with the shared formatter and leaves non-numeric
+ *   values untouched.
+ */
 function formatPreviewValue(value, digits) {
   return typeof value === "number" ? formatNumber(value, digits) : value;
 }

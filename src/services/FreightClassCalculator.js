@@ -1,3 +1,29 @@
+/*
+ * ╔══════════════════════════════════════════════════════════════════════════╗
+ * ║ FILE: FreightClassCalculator.js                                            ║
+ * ╠══════════════════════════════════════════════════════════════════════════╣
+ * ║ RESPONSIBILITY                                                             ║
+ * ║ Converts an item's dimensions and allocated weight into an allowed         ║
+ * ║ density-based Freight Class dropdown value.                                ║
+ * ║                                                                            ║
+ * ║ WHY THIS FILE EXISTS                                                       ║
+ * ║ Freight class logic is business logic that should not be duplicated by     ║
+ * ║ LTL and FTL row factories.                                                 ║
+ * ║                                                                            ║
+ * ║ MAIN CLASSES / FUNCTIONS                                                   ║
+ * ║ • FreightClassCalculator — Freight class logic is business logic that      ║
+ * ║ should not be duplicated by LTL and FTL row factories.                     ║
+ * ║ • calculate — Each output item can need a different class because merged   ║
+ * ║ weights are allocated per item and dimensions can differ.                  ║
+ * ║ • getDensityBasedFreightClass — The default rating rule must               ║
+ * ║ consistently map density to one supported dropdown class.                  ║
+ * ║ • normalizeAllowedClass — Custom classifiers could return text or an       ║
+ * ║ unsupported value, so the result needs a final safety check.               ║
+ * ║ • positiveNumberOrNull — Freight calculations cannot safely use blanks,    ║
+ * ║ text, zero, or negative measurements.                                      ║
+ * ╚══════════════════════════════════════════════════════════════════════════╝
+ */
+
 import { toFiniteNumber } from "../utils/text";
 
 const DENSITY_CLASS_BANDS = [
@@ -25,7 +51,43 @@ const ALLOWED_FREIGHT_CLASSES = new Set(
   DENSITY_CLASS_BANDS.map((band) => band.freightClass),
 );
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ CLASS: FreightClassCalculator                                              │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • Constructor receives optional custom classifier config and issue
+ *   • reporter.
+ *
+ * Returns
+ *   • A reusable calculator service.
+ *
+ * Why / How
+ *   Freight class logic is business logic that should not be duplicated by
+ *   LTL and FTL row factories.
+ *   The service validates item measurements, calculates density, chooses a
+ *   configured/custom or density-band class, and records recoverable
+ *   problems.
+ */
 export class FreightClassCalculator {
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ CONSTRUCTOR: constructor                                                   │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • freightConfig and issueReporter.
+   *
+   * Returns
+   *   • A configured calculator.
+   *
+   * Why / How
+   *   Some projects may later provide an approved custom classifier, while
+   *   normal behavior should still work with built-in density bands.
+   *   It stores a callable custom classifier only when supplied and saves the
+   *   issue reporter.
+   */
   constructor(freightConfig = {}, issueReporter) {
     this.customClassifier =
       typeof freightConfig.classifier === "function"
@@ -43,6 +105,25 @@ export class FreightClassCalculator {
     This intentionally allows two items in the same PO to have different
     classes when they originated from different dimension groups.
   */
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: calculate                                                          │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • item: InputItem with dimensions and allocatedWeight.
+   *
+   * Returns
+   *   • Allowed freight class number, or an empty string for a dropdown-safe
+   *   • blank.
+   *
+   * Why / How
+   *   Each output item can need a different class because merged weights are
+   *   allocated per item and dimensions can differ.
+   *   It validates positive measurements, calculates cubic feet and density,
+   *   selects/validates a class, and logs failures instead of crashing the
+   *   entire import.
+   */
   calculate(item) {
     const location = `Input row ${item.sourceRow}`;
     const length = positiveNumberOrNull(item.length);
@@ -143,6 +224,23 @@ export class FreightClassCalculator {
     return freightClass;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getDensityBasedFreightClass                                        │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • densityPcf: pounds per cubic foot.
+   *
+   * Returns
+   *   • A numeric freight class from the allowed bands.
+   *
+   * Why / How
+   *   The default rating rule must consistently map density to one supported
+   *   dropdown class.
+   *   It walks density bands from highest threshold to lowest and picks the
+   *   first match.
+   */
   getDensityBasedFreightClass(densityPcf) {
     const matchingBand = DENSITY_CLASS_BANDS.find(
       (band) => densityPcf >= band.minimumDensity,
@@ -151,6 +249,23 @@ export class FreightClassCalculator {
     return matchingBand?.freightClass ?? 500;
   }
 
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: normalizeAllowedClass                                              │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • value: proposed class.
+   *
+   * Returns
+   *   • Allowed numeric class or null.
+   *
+   * Why / How
+   *   Custom classifiers could return text or an unsupported value, so the
+   *   result needs a final safety check.
+   *   It converts the value to a finite number and checks membership in the
+   *   allowed class set.
+   */
   normalizeAllowedClass(value) {
     const numericValue = Number(value);
 
@@ -164,6 +279,23 @@ export class FreightClassCalculator {
   }
 }
 
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: positiveNumberOrNull                                             │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • value: raw source value.
+ *
+ * Returns
+ *   • Positive number or null.
+ *
+ * Why / How
+ *   Freight calculations cannot safely use blanks, text, zero, or negative
+ *   measurements.
+ *   It uses the shared numeric parser and accepts only positive finite
+ *   results.
+ */
 function positiveNumberOrNull(value) {
   const numericValue = toFiniteNumber(value);
   return numericValue !== null && numericValue > 0 ? numericValue : null;
