@@ -1,311 +1,286 @@
 /*
  * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║ FILE: FtlOutputRowFactory.js                                               ║
+ * ║ FtlOutputRowFactory.js                                                   ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
- * ║ RESPONSIBILITY                                                             ║
- * ║ Builds output rows for the FTL template using Truck # grouping and         ║
- * ║ FTL-specific pickup, weight, and pallet rules.                             ║
- * ║                                                                            ║
- * ║ WHY THIS FILE EXISTS                                                       ║
- * ║ FTL template rules differ from LTL: grouping, pickup reference, weights,   ║
- * ║ and pallet fields are truck-based.                                         ║
- * ║                                                                            ║
- * ║ MAIN CLASSES / FUNCTIONS                                                   ║
- * ║ • FtlOutputRowFactory — FTL template rules differ from LTL: grouping,      ║
- * ║ pickup reference, weights, and pallet fields are truck-based.              ║
- * ║ • build — The FTL output must place one Order row followed immediately     ║
- * ║ by all Commodity rows for each Truck #.                                    ║
- * ║ • buildPickupReference — FTL uses the same composite value in both         ║
- * ║ Pickup Number and Primary Number, so it should be built once               ║
- * ║ consistently.                                                              ║
- * ║ • getTruckPalletCountOrError — Only the FTL Order row should receive a     ║
- * ║ truck pallet total, and missing totals need a logged visible error.        ║
- * ║ • valueOrError — Required non-dropdown FTL fields should visibly report    ║
- * ║ missing source data.                                                       ║
+ * ║ Converts FTL Truckloads into template rows using the NEW business rules.║
+ * ║ Every Truck # is one Order/Commodity block. Repeated Item Codes on that  ║
+ * ║ truck are combined FIRST, then quantity, weight, pallets, and freight     ║
+ * ║ are calculated. Catalog Description and SKU are checked by Item Code.     ║
+ * ║                                                                          ║
+ * ║ build             — one output row per combined truck/item group.          ║
+ * ║ catalogFieldsFor  — lookup description and validate Supplier Part ID.      ║
+ * ║ aggregateOrError  — report invalid group metrics without stopping export. ║
+ * ║ referenceFrom     — choose the first source row's CustomerPO/IF.           ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
  */
 
 import { OutputLoadRow } from "../models/OutputLoadRow";
 import { ERROR_VALUE } from "../utils/importIssues";
-import { isBlank, numericWhenPossible } from "../utils/text";
+import { isBlank, normalizeText, numericWhenPossible } from "../utils/text";
 
-/**
- * ┌──────────────────────────────────────────────────────────────────────────┐
- * │ CLASS: FtlOutputRowFactory                                                 │
- * └──────────────────────────────────────────────────────────────────────────┘
- *
- * Parameters
- *   • Constructor dependencies for layout, dropdowns, freight, defaults, and
- *   • issue reporting.
- *
- * Returns
- *   • A reusable FTL output row factory.
- *
- * Why / How
- *   FTL template rules differ from LTL: grouping, pickup reference, weights,
- *   and pallet fields are truck-based.
- *   It walks Truck # groups and creates rows with FTL-specific values while
- *   reusing shared dropdown and freight services.
- */
+const CONTRADICTING_CODES = "Contradicting codes";
+const ADDITIONAL_PALLET = "Error: Additional Pallet";
+
 export class FtlOutputRowFactory {
   /**
-   * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ CONSTRUCTOR: constructor                                                   │
-   * └──────────────────────────────────────────────────────────────────────────┘
-   *
-   * Parameters
-   *   • Named dependencies from TemplateWorkbookService.
-   *
-   * Returns
-   *   • A configured FtlOutputRowFactory.
-   *
-   * Why / How
-   *   FTL assembly requires configuration and services but should not directly
-   *   construct them itself.
-   *   It stores the injected dependencies for use during build.
+   * FtlOutputRowFactory
+   * Parameters: layout, dropdownService, freightClassCalculator, defaults,
+   * catalogService and issueReporter.
+   * Keeps FTL business rules isolated from the older LTL row factory.
    */
-  constructor({
-    layout,
-    dropdownService,
-    freightClassCalculator,
-    defaults,
-    issueReporter,
-  }) {
+  constructor({ layout, dropdownService, freightClassCalculator, defaults, catalogService, issueReporter }) {
     this.layout = layout;
     this.dropdownService = dropdownService;
     this.freightClassCalculator = freightClassCalculator;
     this.defaults = defaults;
+    this.catalogService = catalogService;
     this.issueReporter = issueReporter;
   }
 
   /**
-   * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: build                                                              │
-   * └──────────────────────────────────────────────────────────────────────────┘
-   *
-   * Parameters
-   *   • shipment: parsed InputShipment.
-   *
-   * Returns
-   *   • Ordered array of OutputLoadRow instances for the FTL template.
-   *
-   * Why / How
-   *   The FTL output must place one Order row followed immediately by all
-   *   Commodity rows for each Truck #.
-   *   It walks source-order truck groups, calculates FTL-only fields, resolves
-   *   dropdowns, and creates OutputLoadRows.
+   * build
+   * Parameters: InputShipment. Returns: ordered OutputLoadRow[] for FTL.
+   * For every Truck #, combine identical Item Codes before calculating any
+   * metrics. A combined group containing the truck's first raw item is Order;
+   * all other combined groups are Commodity. Each group stays under its truck.
    */
   build(shipment) {
     const outputRows = [];
 
-    /*
-      InputShipment creates trucks in the order each Truck # first appears in
-      the source file. Walking the truck groups directly keeps all related
-      FTL rows together in the downloaded template.
-    */
     shipment.trucks.forEach((truck) => {
-      truck.items.forEach((item) => {
-        const outputRowNumber = this.layout.firstDataRow + outputRows.length;
-        const isOrderRow = truck.isFirstItem(item);
-        const rowType = isOrderRow ? "order" : "commodity";
-        const pickupReference = this.buildPickupReference(item);
-        const freightClass = this.freightClassCalculator.calculate(item);
-        const truckPalletCount = isOrderRow
-          ? this.getTruckPalletCountOrError(truck, item)
-          : "";
-
+      const combinedGroups = truck.getCombinedItemGroups();
+      combinedGroups.forEach((group) => {
+        const item = group.representativeItem;
+        const rowNumber = this.layout.firstDataRow + outputRows.length;
+        const rowType = group.isOrder ? "order" : "commodity";
+        const sourceLocation = `Input row(s) ${group.sourceRows.join(", ")}, Truck # ${truck.truckNumber}`;
         const dropdown = (fieldKey, value, context) =>
           this.dropdownService.resolveExactOptionOrBlank(
-            this.layout.addressFor(fieldKey, outputRowNumber),
+            this.layout.addressFor(fieldKey, rowNumber),
             value,
             context,
           );
 
-        outputRows.push(
-          new OutputLoadRow({
-            type: dropdown("type", rowType, {
-              field: "Type",
-              sourceLocation:
-                `Input row ${item.sourceRow}, Truck # ` +
-                `${valueOrError(item.truckNumber)}`,
-            }),
-            primaryNumber: pickupReference,
-            secondaryNumber: "",
-            fixtDemandId: "",
-            projectName: "",
+        // Aggregate every source row separately before using group metrics.
+        // Weight is SUM(qty_i × G.W._i), not SUM(qty_i) × G.W._first.
+        const quantity = this.aggregateOrError(group, "Quantity", group.sumQuantity());
+        const totalWeight = this.aggregateOrError(group, "Total Weight", group.sumWeight());
+        const length = this.aggregateOrError(group, "Length", group.largestDimension("length"));
+        const width = this.aggregateOrError(group, "Width", group.largestDimension("width"));
+        const height = this.aggregateOrError(group, "Height", group.largestDimension("height"));
+        const freightClass = this.freightClassCalculator.calculate({
+          sourceRow: group.sourceRows.join(", ") ,
+          length,
+          width,
+          height,
+          allocatedWeight: totalWeight,
+        });
+        const catalogFields = this.catalogFieldsFor(group);
 
-            origin: this.dropdownService.resolveOptionContainingOrBlank(
-              this.layout.addressFor("origin", outputRowNumber),
-              this.defaults.origin,
-              {
-                field: "Origin",
-                sourceLocation: "Application default",
-              },
-            ),
+        // The merged group's first item supplies text references; differences
+        // between duplicate rows are logged rather than silently discarded.
+        this.warnOnConflictingReferences(group);
+        const customerPo = this.referenceFrom(item.customerPo);
+        const pickupNumber = this.referenceFrom(item.pickupNumber);
 
-            earliestPickupDate: "",
-            earliestPickupTime: "",
-            latestPickupDate: "",
-            latestPickupTime: "",
-            pickupContactName: "",
-            pickupContactEmail: "",
-            pickupContactPhone: "",
-            bolNumber: "",
-            pickupNumber: pickupReference,
-            originSpecialInstructions: "",
-
-            destination: this.dropdownService.resolveDestinationOrBlank(
-              this.layout.addressFor("destination", outputRowNumber),
-              item.targetStore,
-              item.targetStoreSourceLocation ?? `Input row ${item.sourceRow}`,
-            ),
-
-            earliestDeliveryDate: "",
-            earliestDeliveryTime: "",
-            latestDeliveryDate: "",
-            latestDeliveryTime: "",
-            deliveryContactName: "",
-            deliveryContactEmail: "",
-            deliveryContactPhone: "",
-            deliveryNumber: "",
-            destinationSpecialInstructions: "",
-
-            itemId: "",
-            description: valueOrError(item.oldItemCode),
-            packaging: dropdown("packaging", this.defaults.packaging, {
-              field: "Packaging",
-              sourceLocation: "Application default",
-            }),
-            quantity: valueOrError(item.quantity),
-
-            // FTL: the Truck's Order row keeps its full source G.W.; every
-            // Commodity row deliberately receives 1.
-            totalWeight: isOrderRow ? valueOrError(item.grossWeight) : 1,
-            totalValue: "",
-
-            freightClass: isBlank(freightClass)
-              ? ""
-              : numericWhenPossible(
-                  dropdown("freightClass", freightClass, {
-                    field: "Freight Class",
-                    sourceLocation: `Input row ${item.sourceRow}`,
-                  }),
-                ),
-
-            temperature: "",
-
-            // Only the Order row receives the truck's greatest Pallet count.
-            pallets: truckPalletCount,
-            palletSpaces: truckPalletCount,
-
-            trailerFeet: "",
-            length: valueOrError(item.length),
-            width: valueOrError(item.width),
-            height: valueOrError(item.height),
-            nmfcNumber: "",
-            customerPo: valueOrError(item.customerPo),
-            notes: "",
-            sku: valueOrError(item.oldItemCode),
-            stackable: dropdown("stackable", this.defaults.stackable, {
-              field: "Stackable",
-              sourceLocation: "Application default",
-            }),
-            expedited: "",
+        outputRows.push(new OutputLoadRow({
+          type: dropdown("type", rowType, {
+            field: "Type",
+            sourceLocation,
           }),
-        );
+          primaryNumber: customerPo,
+          secondaryNumber: "",
+          fixtDemandId: "",
+          projectName: "",
+          origin: this.dropdownService.resolveOptionContainingOrBlank(
+            this.layout.addressFor("origin", rowNumber),
+            this.defaults.origin,
+            { field: "Origin", sourceLocation: "Application default" },
+          ),
+          earliestPickupDate: "",
+          earliestPickupTime: "",
+          latestPickupDate: "",
+          latestPickupTime: "",
+          pickupContactName: "",
+          pickupContactEmail: "",
+          pickupContactPhone: "",
+          bolNumber: "",
+          pickupNumber,
+          originSpecialInstructions: "",
+          destination: this.dropdownService.resolveDestinationOrBlank(
+            this.layout.addressFor("destination", rowNumber),
+            item.targetStore,
+            item.targetStoreSourceLocation ?? sourceLocation,
+          ),
+          earliestDeliveryDate: "",
+          earliestDeliveryTime: "",
+          latestDeliveryDate: "",
+          latestDeliveryTime: "",
+          deliveryContactName: "",
+          deliveryContactEmail: "",
+          deliveryContactPhone: "",
+          deliveryNumber: "",
+          destinationSpecialInstructions: "",
+          itemId: "",
+          description: catalogFields.description,
+          packaging: dropdown("packaging", this.defaults.packaging, {
+            field: "Packaging",
+            sourceLocation: "Application default",
+          }),
+          quantity,
+          totalWeight,
+          totalValue: "",
+          freightClass: isBlank(freightClass)
+            ? ""
+            : numericWhenPossible(dropdown("freightClass", freightClass, {
+                field: "Freight Class",
+                sourceLocation,
+              })),
+          temperature: "",
+          // ONE pallet per original input row in this combined item group.
+          // Every FTL row receives its own count; Pallet Spaces is always blank.
+          pallets: group.palletCount,
+          palletSpaces: "",
+          trailerFeet: "",
+          length,
+          width,
+          height,
+          nmfcNumber: "",
+          customerPo,
+          notes: "",
+          sku: catalogFields.sku,
+          stackable: dropdown("stackable", this.defaults.stackable, {
+            field: "Stackable",
+            sourceLocation: "Application default",
+          }),
+          expedited: "",
+        }));
       });
     });
 
     console.info("[Fuse Order Template Filler]", {
-      type: "FTL_OUTPUT_GROUPED_BY_TRUCK",
+      type: "FTL_OUTPUT_COMBINED_BY_TRUCK_AND_ITEM_CODE",
       truckCount: shipment.trucks.length,
-      outputRowCount: outputRows.length,
+      rawItemCount: shipment.itemCount,
+      combinedOutputRowCount: outputRows.length,
     });
-
     return outputRows;
   }
 
   /**
-   * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: buildPickupReference                                               │
-   * └──────────────────────────────────────────────────────────────────────────┘
-   *
-   * Parameters
-   *   • item: InputItem.
-   *
-   * Returns
-   *   • String in the required "{Store #} Truck {Truck #} ({China PO})"
-   *   • format.
-   *
-   * Why / How
-   *   FTL uses the same composite value in both Pickup Number and Primary
-   *   Number, so it should be built once consistently.
-   *   It combines Store #, Truck #, and China PO; missing pieces become
-   *   visible ERROR markers.
+   * catalogFieldsFor
+   * Parameters: FtlItemGroup. Returns: {description, sku}.
+   * Looks up the group's original Item Code. Description comes from Item
+   * Description; SKU uses Supplier Part ID only when it equals the source Old
+   * Item Code (case-insensitive). Otherwise SKU is 'Contradicting codes'.
    */
-  buildPickupReference(item) {
-    const storeNumber = valueOrError(item.targetStore);
-    const truckNumber = valueOrError(item.truckNumber);
-    const chinaPo = valueOrError(item.chinaPo);
+  catalogFieldsFor(group) {
+    const representative = group.representativeItem;
+    if (representative.isAdditionalPallet &&
+        (isBlank(representative.itemCode) || String(representative.itemCode).startsWith("Error"))) {
+      return { description: ADDITIONAL_PALLET, sku: ADDITIONAL_PALLET };
+    }
 
-    return `${storeNumber} Truck ${truckNumber} (${chinaPo})`;
+    const catalogRecord = this.catalogService.lookup(representative.itemCode);
+    if (!catalogRecord) {
+      this.issueReporter.record({
+        type: "FTL_ITEM_CODE_NOT_IN_CATALOG",
+        location: `Input row ${representative.sourceRow}`,
+        field: "Item Code / Description / SKU",
+        message: `Item Code "${representative.itemCode}" has no entry in BEELINEGROUPFX_L3.xlsx.`,
+        resolution: `Description receives ${ERROR_VALUE}; SKU receives ${CONTRADICTING_CODES}.`,
+      });
+      return { description: ERROR_VALUE, sku: CONTRADICTING_CODES };
+    }
+
+    let description = catalogRecord.description;
+    if (isBlank(description)) {
+      this.issueReporter.record({
+        type: "FTL_CATALOG_DESCRIPTION_MISSING",
+        location: catalogRecord.catalogLocation,
+        field: "Item Description",
+        message: `Item Code "${representative.itemCode}" has no Item Description.`,
+        resolution: `Description receives ${ERROR_VALUE}.`,
+      });
+      description = ERROR_VALUE;
+    }
+
+    const inputOldCodes = group.items.map((item) => normalizeText(item.oldItemCode));
+    const catalogCode = normalizeText(catalogRecord.supplierPartId);
+    const codesMatch = Boolean(catalogCode) &&
+      inputOldCodes.every((code) => code === catalogCode);
+
+    if (!codesMatch) {
+      this.issueReporter.record({
+        type: "FTL_CONTRADICTING_SUPPLIER_PART_IDS",
+        location: `Input rows ${group.sourceRows.join(", ")}; ${catalogRecord.catalogLocation}`,
+        field: "SKU / Old Item Code",
+        message: `Supplier Part ID "${catalogRecord.supplierPartId}" does not match every source Old Item Code (${group.items.map((item) => item.oldItemCode).join(", ")}).`,
+        resolution: `SKU receives "${CONTRADICTING_CODES}". Comparison ignores capitalization.`,
+      });
+    }
+
+    return {
+      description,
+      sku: codesMatch ? catalogRecord.supplierPartId : CONTRADICTING_CODES,
+    };
   }
 
   /**
-   * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: getTruckPalletCountOrError                                         │
-   * └──────────────────────────────────────────────────────────────────────────┘
-   *
-   * Parameters
-   *   • truck: Truckload; item: Order-row InputItem.
-   *
-   * Returns
-   *   • Positive pallet count or ERROR_VALUE.
-   *
-   * Why / How
-   *   Only the FTL Order row should receive a truck pallet total, and missing
-   *   totals need a logged visible error.
-   *   It asks Truckload for its greatest usable pallet count and records an
-   *   issue if no positive value exists.
+   * aggregateOrError
+   * Parameters: FtlItemGroup, field name, computed number (or null).
+   * Returns: valid numeric aggregate or source-specific visible error marker.
+   * Invalid arithmetic never silently becomes 0; dropdown Freight Class uses
+   * a blank when metrics cannot be computed.
    */
-  getTruckPalletCountOrError(truck, item) {
-    const palletCount = truck.getGreatestPalletCount();
+  aggregateOrError(group, field, result) {
+    if (typeof result === "number" && Number.isFinite(result)) return result;
 
-    if (palletCount !== ERROR_VALUE) {
-      return palletCount;
-    }
-
+    const isAdditionalPallet = group.items.some((item) => item.isAdditionalPallet);
+    const errorText = isAdditionalPallet ? ADDITIONAL_PALLET : ERROR_VALUE;
     this.issueReporter.record({
-      type: "FTL_TRUCK_PALLET_COUNT_UNAVAILABLE",
-      location: `Input Truck # ${valueOrError(item.truckNumber)}`,
-      field: "Pallets / Pallet Spaces",
-      message:
-        `Truck # ${valueOrError(item.truckNumber)} has no usable positive ` +
-        "Pallet value.",
-      resolution:
-        'The FTL Order row will receive "ERROR" in Pallets and Pallet Spaces.',
+      type: isAdditionalPallet ? "FTL_ADDITIONAL_PALLET_METRIC_MISSING" : "FTL_INVALID_AGGREGATE",
+      location: `Input row(s) ${group.sourceRows.join(", ")}`,
+      field,
+      message: `Cannot calculate ${field} for grouped FTL Item Code "${group.representativeItem.itemCode}".`,
+      resolution: `The output ${field} field receives "${errorText}". Freight Class stays blank when unavailable.`,
     });
-
-    return ERROR_VALUE;
+    return errorText;
   }
-}
 
-/**
- * ┌──────────────────────────────────────────────────────────────────────────┐
- * │ FUNCTION: valueOrError                                                     │
- * └──────────────────────────────────────────────────────────────────────────┘
- *
- * Parameters
- *   • value: any source/output value.
- *
- * Returns
- *   • Original value or ERROR_VALUE.
- *
- * Why / How
- *   Required non-dropdown FTL fields should visibly report missing source
- *   data.
- *   It returns a present value or the shared ERROR marker.
- */
-function valueOrError(value) {
-  return isBlank(value) ? ERROR_VALUE : value;
+  /**
+   * referenceFrom
+   * Parameters: one original text/value. Returns: source value or ERROR.
+   * Primary Number and Pickup Number are copied directly from the first
+   * matching raw row, without the old Truck/China PO combination.
+   */
+  referenceFrom(value) {
+    return isBlank(value) ? ERROR_VALUE : value;
+  }
+
+  /**
+   * warnOnConflictingReferences
+   * Parameters: FtlItemGroup. Returns: nothing.
+   * A duplicate Item Code may have different CustomerPO, IF, or destinations.
+   * The first source row wins; logging makes this choice auditable.
+   */
+  warnOnConflictingReferences(group) {
+    if (group.items.length < 2) return;
+    const first = group.representativeItem;
+    for (const [field, displayName] of [
+      ["customerPo", "CustomerPO"],
+      ["pickupNumber", "IF"],
+      ["targetStore", "Store #"],
+    ]) {
+      if (group.items.some((item) => normalizeText(item[field]) !== normalizeText(first[field]))) {
+        this.issueReporter.record({
+          type: "FTL_COMBINED_REFERENCE_MISMATCH",
+          location: `Input rows ${group.sourceRows.join(", ")}`,
+          field: displayName,
+          message: `Combined rows have different ${displayName} values.`,
+          resolution: `Using the first source row (${first.sourceRow}) value "${first[field]}".`,
+        });
+      }
+    }
+  }
 }

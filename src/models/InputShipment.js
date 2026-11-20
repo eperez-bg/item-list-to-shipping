@@ -1,68 +1,52 @@
 /*
  * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║ FILE: InputShipment.js                                                     ║
+ * ║ FILE: InputShipment.js                                                  ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
- * ║ RESPONSIBILITY                                                             ║
- * ║ Owns the parsed collection of input items and builds the PO and truck      ║
- * ║ groupings used by LTL and FTL output.                                      ║
- * ║                                                                            ║
- * ║ WHY THIS FILE EXISTS                                                       ║
- * ║ Both workflows need the same parsed items plus different ways to group     ║
- * ║ them, so grouping belongs in a shared shipment model.                      ║
- * ║                                                                            ║
- * ║ MAIN CLASSES / FUNCTIONS                                                   ║
- * ║ • InputShipment — Both workflows need the same parsed items plus           ║
- * ║ different ways to group them, so grouping belongs in a shared shipment     ║
- * ║ model.                                                                     ║
- * ║ • itemCount — The UI needs a reliable summary count without duplicating    ║
- * ║ the flattening logic.                                                      ║
- * ║ • purchaseOrderCount — LTL status messaging needs the number of logical    ║
- * ║ PO groups.                                                                 ║
- * ║ • truckCount — FTL status messaging needs the number of Truck # groups.    ║
- * ║ • getPurchaseOrderForItem — Callers should not have to scan every PO       ║
- * ║ group just to find an item's group.                                        ║
- * ║ • getTruckForItem — Callers should not have to scan every Truck # group    ║
- * ║ just to find an item's group.                                              ║
- * ║ • createPurchaseOrders — LTL output must group all same-PO items           ║
- * ║ together even when the input sheet has them in separate physical groups.   ║
- * ║ • createPurchaseOrderIndex — Fast lookup avoids repeated nested loops      ║
- * ║ during preview or output creation.                                         ║
- * ║ • createTruckloads — FTL output must group all same-truck items together   ║
- * ║ even when they are separated in the input sheet.                           ║
- * ║ • createTruckIndex — Fast lookup avoids repeated scans of truck groups.    ║
- * ║ • getPurchaseOrderKey — Missing or invalid PO values must not make         ║
- * ║ unrelated rows look like one order.                                        ║
- * ║ • getTruckKey — Missing or invalid Truck # values must not combine         ║
- * ║ unrelated FTL rows.                                                        ║
+ * ║ RESPONSIBILITY                                                          ║
+ * ║ Owns the parsed collection of input items and builds the grouping models║
+ * ║ used by the LTL and FTL output flows.                                    ║
+ * ║                                                                         ║
+ * ║ WHY THIS FILE EXISTS                                                    ║
+ * ║ The workbook reader should only normalize rows and physical merged-cell ║
+ * ║ groups. Business groupings, such as LTL Store/Truck groups and FTL      ║
+ * ║ Truck # groups, belong in one shared shipment model.                    ║
+ * ║                                                                         ║
+ * ║ MAIN CLASSES / FUNCTIONS                                                ║
+ * ║ • InputShipment — Parsed shipment plus grouping helpers.                ║
+ * ║ • createStores — Groups LTL rows by normalized Store #.                 ║
+ * ║ • createStoreTrucks — Flattens each StoreGroup truck list for LTL.      ║
+ * ║ • createPurchaseOrders — Kept for compatibility/diagnostics.            ║
+ * ║ • createTruckloads — Groups FTL rows by Truck #.                        ║
+ * ║ • get*Key — Builds safe keys while isolating missing/error values.      ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
  */
 
 import { PurchaseOrder } from "./PurchaseOrder";
+import { StoreGroup } from "./StoreGroup";
 import { Truckload } from "./Truckload";
 import { ERROR_VALUE } from "../utils/importIssues";
-import { normalizeText } from "../utils/text";
+import { isBlank, normalizeText } from "../utils/text";
 
 /**
  * ┌──────────────────────────────────────────────────────────────────────────┐
- * │ CLASS: InputShipment                                                       │
+ * │ CLASS: InputShipment                                                    │
  * └──────────────────────────────────────────────────────────────────────────┘
  *
  * Parameters
- *   • skids: physical groups; issues: recoverable import issues.
+ *   • skids: physical merged-dimension groups; issues: recoverable import log.
  *
  * Returns
- *   • An InputShipment instance with grouping helpers.
+ *   • An InputShipment instance with ready-to-use LTL and FTL groupings.
  *
  * Why / How
- *   Both workflows need the same parsed items plus different ways to group
- *   them, so grouping belongs in a shared shipment model.
- *   It flattens skid items once, then builds PO and Truck # collections plus
- *   fast item-to-group indexes.
+ *   Output builders should not repeatedly scan the raw row list to determine
+ *   groups. The constructor flattens all items once, then eagerly creates Store
+ *   groups for LTL, Truck # groups for FTL, and lookup indexes for previews.
  */
 export class InputShipment {
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ CONSTRUCTOR: constructor                                                   │
+   * │ CONSTRUCTOR: constructor                                                │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
@@ -72,19 +56,22 @@ export class InputShipment {
    *   • A populated InputShipment instance.
    *
    * Why / How
-   *   The shipment should be fully ready for either LTL or FTL immediately
-   *   after construction.
-   *   It saves the raw collections and eagerly builds all grouping and lookup
-   *   structures.
+   *   The shipment should be ready immediately after parsing. This constructor
+   *   saves the physical groups and builds business group collections in source
+   *   first-appearance order.
    */
   constructor({ skids, issues = [] }) {
     this.skids = skids;
     this.issues = issues;
-
     this.items = this.skids.flatMap((skid) => skid.items);
 
     this.purchaseOrders = this.createPurchaseOrders();
     this.purchaseOrderByItem = this.createPurchaseOrderIndex();
+
+    this.stores = this.createStores();
+    this.storeByItem = this.createStoreIndex();
+    this.storeTrucks = this.createStoreTrucks();
+    this.storeTruckByItem = this.createStoreTruckIndex();
 
     this.trucks = this.createTruckloads();
     this.truckByItem = this.createTruckIndex();
@@ -92,19 +79,14 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ GETTER: itemCount                                                          │
+   * │ GETTER: itemCount                                                       │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
    *   • None.
    *
    * Returns
-   *   • Number of input items.
-   *
-   * Why / How
-   *   The UI needs a reliable summary count without duplicating the flattening
-   *   logic.
-   *   It returns the length of the normalized items collection.
+   *   • Number of parsed input items.
    */
   get itemCount() {
     return this.items.length;
@@ -112,18 +94,14 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ GETTER: purchaseOrderCount                                                 │
+   * │ GETTER: purchaseOrderCount                                              │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
    *   • None.
    *
    * Returns
-   *   • Number of PO groups.
-   *
-   * Why / How
-   *   LTL status messaging needs the number of logical PO groups.
-   *   It returns the current purchaseOrders array length.
+   *   • Number of CustomerPO groups.
    */
   get purchaseOrderCount() {
     return this.purchaseOrders.length;
@@ -131,18 +109,44 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ GETTER: truckCount                                                         │
+   * │ GETTER: storeCount                                                      │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
    *   • None.
    *
    * Returns
-   *   • Number of truck groups.
+   *   • Number of normalized Store # groups for LTL.
+   */
+  get storeCount() {
+    return this.stores.length;
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ GETTER: storeTruckCount                                                 │
+   * └──────────────────────────────────────────────────────────────────────────┘
    *
-   * Why / How
-   *   FTL status messaging needs the number of Truck # groups.
-   *   It returns the current trucks array length.
+   * Parameters
+   *   • None.
+   *
+   * Returns
+   *   • Number of generated StoreTruck groups for LTL.
+   */
+  get storeTruckCount() {
+    return this.storeTrucks.length;
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ GETTER: truckCount                                                      │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • None.
+   *
+   * Returns
+   *   • Number of Truck # groups for FTL.
    */
   get truckCount() {
     return this.trucks.length;
@@ -150,19 +154,14 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: getPurchaseOrderForItem                                            │
+   * │ METHOD: getPurchaseOrderForItem                                         │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
-   *   • item: an InputItem.
+   *   • item: InputItem.
    *
    * Returns
    *   • PurchaseOrder or null.
-   *
-   * Why / How
-   *   Callers should not have to scan every PO group just to find an item's
-   *   group.
-   *   It performs a Map lookup created during construction.
    */
   getPurchaseOrderForItem(item) {
     return this.purchaseOrderByItem.get(item) ?? null;
@@ -170,19 +169,44 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: getTruckForItem                                                    │
+   * │ METHOD: getStoreForItem                                                 │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
-   *   • item: an InputItem.
+   *   • item: InputItem.
+   *
+   * Returns
+   *   • StoreGroup or null.
+   */
+  getStoreForItem(item) {
+    return this.storeByItem.get(item) ?? null;
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getStoreTruckForItem                                            │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • item: InputItem.
+   *
+   * Returns
+   *   • StoreTruck or null.
+   */
+  getStoreTruckForItem(item) {
+    return this.storeTruckByItem.get(item) ?? null;
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getTruckForItem                                                 │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • item: InputItem.
    *
    * Returns
    *   • Truckload or null.
-   *
-   * Why / How
-   *   Callers should not have to scan every Truck # group just to find an
-   *   item's group.
-   *   It performs a Map lookup created during construction.
    */
   getTruckForItem(item) {
     return this.truckByItem.get(item) ?? null;
@@ -190,7 +214,7 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: createPurchaseOrders                                               │
+   * │ METHOD: createPurchaseOrders                                            │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
@@ -200,10 +224,8 @@ export class InputShipment {
    *   • PurchaseOrder instances in first-appearance order.
    *
    * Why / How
-   *   LTL output must group all same-PO items together even when the input
-   *   sheet has them in separate physical groups.
-   *   It creates one PurchaseOrder per normalized PO key and appends items in
-   *   source order.
+   *   PO groups are no longer the LTL Order/Commodity grouping, but they remain
+   *   useful for diagnostics and any future PO-based reports.
    */
   createPurchaseOrders() {
     const groups = new Map();
@@ -212,11 +234,64 @@ export class InputShipment {
       const key = this.getPurchaseOrderKey(item.customerPo, item.sourceRow);
 
       if (!groups.has(key)) {
+        groups.set(key, new PurchaseOrder({ key, customerPo: item.customerPo }));
+      }
+
+      groups.get(key).addItem(item);
+    });
+
+    return Array.from(groups.values());
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: createPurchaseOrderIndex                                        │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • None; reads this.purchaseOrders.
+   *
+   * Returns
+   *   • Map<InputItem, PurchaseOrder>.
+   */
+  createPurchaseOrderIndex() {
+    const index = new Map();
+
+    this.purchaseOrders.forEach((purchaseOrder) => {
+      purchaseOrder.items.forEach((item) => index.set(item, purchaseOrder));
+    });
+
+    return index;
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: createStores                                                    │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • None; reads this.items.
+   *
+   * Returns
+   *   • StoreGroup instances in first-appearance order.
+   *
+   * Why / How
+   *   LTL now groups by destination Store #. The first item for a Store # starts
+   *   that store's generated truck, and later rows for that store are appended
+   *   as Commodities beneath the same Order row.
+   */
+  createStores() {
+    const groups = new Map();
+
+    this.items.forEach((item) => {
+      const key = this.getStoreKey(item.targetStore, item.sourceRow);
+
+      if (!groups.has(key)) {
         groups.set(
           key,
-          new PurchaseOrder({
+          new StoreGroup({
             key,
-            customerPo: item.customerPo,
+            storeNumber: item.targetStore,
           }),
         );
       }
@@ -229,26 +304,21 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: createPurchaseOrderIndex                                           │
+   * │ METHOD: createStoreIndex                                                │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
-   *   • None; reads this.purchaseOrders.
+   *   • None; reads this.stores.
    *
    * Returns
-   *   • Map<InputItem, PurchaseOrder>.
-   *
-   * Why / How
-   *   Fast lookup avoids repeated nested loops during preview or output
-   *   creation.
-   *   It creates a Map from each InputItem to its containing PurchaseOrder.
+   *   • Map<InputItem, StoreGroup>.
    */
-  createPurchaseOrderIndex() {
+  createStoreIndex() {
     const index = new Map();
 
-    this.purchaseOrders.forEach((purchaseOrder) => {
-      purchaseOrder.items.forEach((item) => {
-        index.set(item, purchaseOrder);
+    this.stores.forEach((store) => {
+      store.trucks.forEach((truck) => {
+        truck.items.forEach((item) => index.set(item, store));
       });
     });
 
@@ -257,20 +327,54 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: createTruckloads                                                   │
+   * │ METHOD: createStoreTrucks                                               │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • None; reads this.stores.
+   *
+   * Returns
+   *   • Flattened StoreTruck instances in store first-appearance order.
+   */
+  createStoreTrucks() {
+    return this.stores.flatMap((store) => store.trucks);
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: createStoreTruckIndex                                           │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • None; reads this.storeTrucks.
+   *
+   * Returns
+   *   • Map<InputItem, StoreTruck>.
+   */
+  createStoreTruckIndex() {
+    const index = new Map();
+
+    this.storeTrucks.forEach((truck) => {
+      truck.items.forEach((item) => index.set(item, truck));
+    });
+
+    return index;
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: createTruckloads                                                │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
    *   • None; reads this.items.
    *
    * Returns
-   *   • Truckload instances in first-appearance order.
+   *   • Truckload instances in first-appearance Truck # order.
    *
    * Why / How
-   *   FTL output must group all same-truck items together even when they are
-   *   separated in the input sheet.
-   *   It creates one Truckload per normalized Truck # key and appends items in
-   *   source order.
+   *   FTL is intentionally restored to its Truck # grouping. This keeps the FTL
+   *   flow separate from the new LTL Store # grouping.
    */
   createTruckloads() {
     const groups = new Map();
@@ -279,13 +383,7 @@ export class InputShipment {
       const key = this.getTruckKey(item.truckNumber, item.sourceRow);
 
       if (!groups.has(key)) {
-        groups.set(
-          key,
-          new Truckload({
-            key,
-            truckNumber: item.truckNumber,
-          }),
-        );
+        groups.set(key, new Truckload({ key, truckNumber: item.truckNumber }));
       }
 
       groups.get(key).addItem(item);
@@ -296,7 +394,7 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: createTruckIndex                                                   │
+   * │ METHOD: createTruckIndex                                                │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
@@ -304,18 +402,12 @@ export class InputShipment {
    *
    * Returns
    *   • Map<InputItem, Truckload>.
-   *
-   * Why / How
-   *   Fast lookup avoids repeated scans of truck groups.
-   *   It creates a Map from each InputItem to its containing Truckload.
    */
   createTruckIndex() {
     const index = new Map();
 
     this.trucks.forEach((truck) => {
-      truck.items.forEach((item) => {
-        index.set(item, truck);
-      });
+      truck.items.forEach((item) => index.set(item, truck));
     });
 
     return index;
@@ -323,7 +415,7 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: getPurchaseOrderKey                                                │
+   * │ METHOD: getPurchaseOrderKey                                             │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
@@ -331,12 +423,6 @@ export class InputShipment {
    *
    * Returns
    *   • A safe PO grouping key.
-   *
-   * Why / How
-   *   Missing or invalid PO values must not make unrelated rows look like one
-   *   order.
-   *   It delegates to the normalized-key helper with a PO-specific missing
-   *   prefix.
    */
   getPurchaseOrderKey(customerPo, sourceRow) {
     return this.getNormalizedGroupKey("missing-or-error-po", customerPo, sourceRow);
@@ -344,31 +430,87 @@ export class InputShipment {
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: getTruckKey                                                        │
+   * │ METHOD: getStoreKey                                                     │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • storeNumber and the row where it was found.
+   *
+   * Returns
+   *   • A safe Store # grouping key.
+   *
+   * Why / How
+   *   Store values can arrive as 1310, 01310, 1310.0, or text containing a
+   *   single store number. The key extracts that one number and strips leading
+   *   zeros so equivalent store values group together.
+   */
+  getStoreKey(storeNumber, sourceRow) {
+    const normalizedStore = this.getNormalizedStoreNumber(storeNumber);
+
+    if (!normalizedStore || normalizedStore === normalizeText(ERROR_VALUE)) {
+      return `missing-or-error-store-row-${sourceRow}`;
+    }
+
+    return `store-${normalizedStore}`;
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getTruckKey                                                     │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
    *   • truckNumber and the row where it was found.
    *
    * Returns
-   *   • A safe truck grouping key.
-   *
-   * Why / How
-   *   Missing or invalid Truck # values must not combine unrelated FTL rows.
-   *   It delegates to the normalized-key helper with a truck-specific missing
-   *   prefix.
+   *   • A safe Truck # grouping key for FTL.
    */
   getTruckKey(truckNumber, sourceRow) {
-    return this.getNormalizedGroupKey(
-      "missing-or-error-truck",
-      truckNumber,
-      sourceRow,
-    );
+    return this.getNormalizedGroupKey("missing-or-error-truck", truckNumber, sourceRow);
   }
 
   /**
    * ┌──────────────────────────────────────────────────────────────────────────┐
-   * │ METHOD: getNormalizedGroupKey                                              │
+   * │ METHOD: getNormalizedStoreNumber                                        │
+   * └──────────────────────────────────────────────────────────────────────────┘
+   *
+   * Parameters
+   *   • value: raw Store # cell value.
+   *
+   * Returns
+   *   • A normalized digit string with leading zeros removed, or blank.
+   *
+   * Why / How
+   *   Store grouping should not split 1310, 01310, and 1310.0 into different
+   *   trucks. It accepts direct numeric-looking values or one number embedded
+   *   in a label, but refuses values with multiple unrelated numbers.
+   */
+  getNormalizedStoreNumber(value) {
+    if (isBlank(value)) return "";
+
+    if (typeof value === "number") {
+      if (!Number.isSafeInteger(value) || value < 0) return "";
+      return String(value);
+    }
+
+    const text = String(value)
+      .normalize("NFKC")
+      .replace(/\u00a0/g, " ")
+      .replace(/,/g, "")
+      .trim();
+
+    const directMatch = text.match(/^0*(\d+)(?:\.0+)?$/);
+    if (directMatch) return directMatch[1] || "0";
+
+    const numberGroups = text.match(/\d+/g) ?? [];
+    if (numberGroups.length !== 1) return "";
+
+    return numberGroups[0].replace(/^0+/, "") || "0";
+  }
+
+  /**
+   * ┌──────────────────────────────────────────────────────────────────────────┐
+   * │ METHOD: getNormalizedGroupKey                                           │
    * └──────────────────────────────────────────────────────────────────────────┘
    *
    * Parameters
@@ -378,16 +520,12 @@ export class InputShipment {
    *   • A normalized, safe Map key.
    *
    * Why / How
-   *   Grouping needs case-insensitive matching but must preserve row isolation
-   *   for missing/error values.
-   *   It normalizes usable text; otherwise it builds a unique key using the
-   *   row number.
+   *   Grouping needs case-insensitive matching but must isolate missing/error
+   *   values so unrelated bad rows do not become one group by accident.
    */
   getNormalizedGroupKey(missingPrefix, value, sourceRow) {
     const normalizedValue = normalizeText(value);
 
-    // Unknown values must never get grouped together. Each bad row is its own
-    // Order row instead of accidentally becoming Commodity.
     if (!normalizedValue || normalizedValue === normalizeText(ERROR_VALUE)) {
       return `${missingPrefix}-row-${sourceRow}`;
     }

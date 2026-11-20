@@ -42,7 +42,8 @@ import {
 import { InputWorkbookReader } from "./services/InputWorkbookReader";
 import { TemplateWorkbookService } from "./services/TemplateWorkbookService";
 import { downloadBlob } from "./utils/download";
-import { formatNumber } from "./utils/text";
+import { ERROR_VALUE } from "./utils/importIssues";
+import { formatNumber, roundToDecimalPlaces, toFiniteNumber } from "./utils/text";
 import "./App.css";
 
 /**
@@ -151,7 +152,7 @@ function App() {
         : "";
       const groupingText = shippingMode === SHIPPING_MODES.FTL
         ? `${parsedShipment.truckCount} Truck #(s)`
-        : `${parsedShipment.purchaseOrderCount} Customer PO(s)`;
+        : `${parsedShipment.storeCount} Store #(s)`;
 
       setStatus(
         `Ready: ${parsedShipment.itemCount} item row(s) across ${groupingText}.${issueText}`,
@@ -309,9 +310,11 @@ function App() {
 
       {shippingMode === SHIPPING_MODES.FTL && (
         <p className="modeHint">
-          FTL requires <code>Truck #</code>, <code>Pallet</code>, and <code>China PO</code>.
-          Header capitalization does not matter. A row whose <code>container</code> value is
-          <code>additional pallet</code> can omit regular item details.
+          FTL requires <code>Truck #</code>, <code>Item Code</code>, <code>IF</code>,
+          and <code>target order casepack qty</code>. Repeated Item Codes on one truck
+          are combined. Headers are case-insensitive. The FTL catalog must exist at
+          <code> public/catalogs/BEELINEGROUPFX_L3.xlsx</code>. A row marked
+          <code> additional pallet</code> may omit regular item details.
         </p>
       )}
 
@@ -340,15 +343,16 @@ function App() {
               <thead>
                 {shippingMode === SHIPPING_MODES.FTL ? (
                   <tr>
-                    <th>Source Row</th>
+                    <th>Source Rows</th>
                     <th>Type</th>
                     <th>Truck #</th>
                     <th>Customer PO</th>
-                    <th>Old Item Code</th>
+                    <th>Item Code</th>
                     <th>Store</th>
-                    <th>China PO</th>
-                    <th>Order Weight</th>
-                    <th>Truck Pallets</th>
+                    <th>Pickup IF</th>
+                    <th>Casepack Qty</th>
+                    <th>Total Weight</th>
+                    <th>Pallets</th>
                   </tr>
                 ) : (
                   <tr>
@@ -374,9 +378,10 @@ function App() {
                       <td>{row.customerPo}</td>
                       <td>{row.itemCode}</td>
                       <td>{row.targetStore}</td>
-                      <td>{row.chinaPo}</td>
-                      <td>{row.orderWeight}</td>
-                      <td>{row.truckPallets}</td>
+                      <td>{row.pickupNumber}</td>
+                      <td>{row.quantity}</td>
+                      <td>{row.totalWeight}</td>
+                      <td>{row.pallets}</td>
                     </tr>
                   ) : (
                     <tr key={row.sourceRow}>
@@ -415,25 +420,27 @@ function App() {
  * Why / How
  *   The preview should mirror the ordering and calculations used by the
  *   downloaded workbook so users can spot issues early.
- *   It chooses truck groups for FTL or PO groups plus a skid index for LTL,
+ *   It chooses truck groups for FTL or Store/Truck groups plus a skid index for LTL,
  *   then produces display-ready row objects.
  */
 function buildPreviewRows(shipment, shippingMode) {
   if (shippingMode === SHIPPING_MODES.FTL) {
+    // Preview exactly the same pre-aggregation used by the FTL output factory.
+    // Catalog fields are resolved only on download and are not shown here.
     return shipment.trucks.flatMap((truck) =>
-      truck.items.map((item) => {
-        const isOrderRow = truck.isFirstItem(item);
-
+      truck.getCombinedItemGroups().map((group) => {
+        const item = group.representativeItem;
         return {
-          sourceRow: item.sourceRow,
-          type: isOrderRow ? "order" : "commodity",
-          truckNumber: item.truckNumber,
+          sourceRow: group.sourceRows.join(", "),
+          type: group.isOrder ? "order" : "commodity",
+          truckNumber: truck.truckNumber,
           customerPo: item.customerPo,
-          itemCode: item.oldItemCode,
+          itemCode: item.itemCode,
           targetStore: item.targetStore || "(blank — Destination left blank)",
-          chinaPo: item.chinaPo,
-          orderWeight: isOrderRow ? item.grossWeight : 1,
-          truckPallets: isOrderRow ? truck.getGreatestPalletCount() : "",
+          pickupNumber: item.pickupNumber,
+          quantity: group.sumQuantity() ?? ERROR_VALUE,
+          totalWeight: group.sumWeight() ?? ERROR_VALUE,
+          pallets: group.palletCount,
         };
       }),
     );
@@ -441,23 +448,123 @@ function buildPreviewRows(shipment, shippingMode) {
 
   const skidByItem = createSkidIndex(shipment);
 
-  return shipment.purchaseOrders.flatMap((purchaseOrder) =>
-    purchaseOrder.items.map((item) => {
-      const skid = skidByItem.get(item);
+  return shipment.storeTrucks.flatMap((truck) =>
+    truck.getCombinedItemGroups().map((combinedGroup) => {
+      const item = combinedGroup.representativeItem;
+      const metrics = buildCombinedPreviewMetrics(combinedGroup, skidByItem);
 
       return {
-        sourceRow: item.sourceRow,
-        type: purchaseOrder.isFirstItem(item) ? "order" : "commodity",
+        sourceRow: combinedGroup.sourceRows,
+        type: truck.isOrderGroup(combinedGroup) ? "order" : "commodity",
         customerPo: item.customerPo,
         itemCode: item.oldItemCode,
-        quantity: item.quantity,
+        quantity: metrics.quantity,
         targetStore: item.targetStore || "(blank — Destination left blank)",
-        dimensions: `${item.length} × ${item.width} × ${item.height}`,
-        allocatedWeight: item.allocatedWeight,
-        palletFraction: skid ? skid.getPalletShareForItem(item, 3) : "",
+        dimensions: `${metrics.length} × ${metrics.width} × ${metrics.height}`,
+        allocatedWeight: metrics.totalWeight,
+        palletFraction: metrics.palletShare,
       };
     }),
   );
+}
+
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: buildCombinedPreviewMetrics                                    │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • combinedGroup: StoreTruckItemGroup used for one LTL output row.
+ *   • skidByItem: Map<InputItem, InputSkid> for pallet share lookup.
+ *
+ * Returns
+ *   • Preview-friendly aggregate quantity, dimensions, weight, and pallet data.
+ *
+ * Why / How
+ *   The LTL preview should reflect the same duplicate-item combining rule as
+ *   the downloaded template. It sums calculated carton quantities, allocated
+ *   weights, and pallet shares while keeping the largest L/W/H values.
+ */
+function buildCombinedPreviewMetrics(combinedGroup, skidByItem) {
+  return {
+    quantity: sumPreviewNumbers(
+      combinedGroup.items.map((item) => {
+        const rawQuantity = toFiniteNumber(item.quantity);
+        const casepackQty = toFiniteNumber(item.casepackQty);
+
+        return rawQuantity !== null && casepackQty !== null && casepackQty > 0
+          ? rawQuantity / casepackQty
+          : ERROR_VALUE;
+      }),
+      3,
+    ),
+    length: maxPreviewNumber(combinedGroup.items.map((item) => item.length)),
+    width: maxPreviewNumber(combinedGroup.items.map((item) => item.width)),
+    height: maxPreviewNumber(combinedGroup.items.map((item) => item.height)),
+    totalWeight: sumPreviewNumbers(
+      combinedGroup.items.map((item) => item.allocatedWeight),
+      4,
+    ),
+    palletShare: sumPreviewNumbers(
+      combinedGroup.items.map((item) => {
+        const skid = skidByItem.get(item);
+        return skid ? skid.getPalletShareForItem(item, 3) : ERROR_VALUE;
+      }),
+      3,
+    ),
+  };
+}
+
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: sumPreviewNumbers                                              │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • values: values to sum; digits: final decimal precision.
+ *
+ * Returns
+ *   • Rounded numeric sum, or ERROR_VALUE when any value is invalid.
+ *
+ * Why / How
+ *   Preview rows should not hide calculation problems. If any part of a
+ *   combined row is invalid, the preview shows the same error text pattern the
+ *   generated workbook will use.
+ */
+function sumPreviewNumbers(values, digits) {
+  const numericValues = values.map((value) => toFiniteNumber(value));
+
+  if (numericValues.some((value) => value === null)) {
+    return ERROR_VALUE;
+  }
+
+  return roundToDecimalPlaces(
+    numericValues.reduce((sum, value) => sum + value, 0),
+    digits,
+  );
+}
+
+/**
+ * ┌──────────────────────────────────────────────────────────────────────────┐
+ * │ FUNCTION: maxPreviewNumber                                               │
+ * └──────────────────────────────────────────────────────────────────────────┘
+ *
+ * Parameters
+ *   • values: candidate dimension values.
+ *
+ * Returns
+ *   • Largest valid numeric value, or ERROR_VALUE when none exist.
+ *
+ * Why / How
+ *   Combined duplicate rows keep the largest Length, Width, and Height. This
+ *   helper mirrors that rule for the on-screen preview.
+ */
+function maxPreviewNumber(values) {
+  const numericValues = values
+    .map((value) => toFiniteNumber(value))
+    .filter((value) => value !== null);
+
+  return numericValues.length > 0 ? Math.max(...numericValues) : ERROR_VALUE;
 }
 
 /**
@@ -507,8 +614,8 @@ function createSkidIndex(shipment) {
  */
 function previewDescription(shippingMode) {
   return shippingMode === SHIPPING_MODES.FTL
-    ? "Preview and download are grouped by Truck #: each Order row is followed immediately by every Commodity row in that truck."
-    : "Preview and download are grouped by Customer PO: each Order row is followed immediately by every Commodity row for that PO. Pallet shares still use merged-dimension groups.";
+    ? "FTL items are combined by Truck # and Item Code before quantity, total weight, pallets, and freight are calculated. The first combined item is Order; other items in the truck are Commodity."
+    : "Preview and download are grouped by Store #: each Order row is followed by its Commodity rows. Matching Item Code + CustomerPO rows inside the same Store group are combined before output.";
 }
 
 /**

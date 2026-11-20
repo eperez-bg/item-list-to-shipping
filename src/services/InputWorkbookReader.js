@@ -196,26 +196,25 @@ export class InputWorkbookReader {
       const isAdditionalPallet = this.isFtl() && this.isAdditionalPallet(container);
 
       const rawOldItemCode = this.readEffectiveValue(
-        worksheet,
-        headerMap.columns.oldItemCode,
-        rowNumber,
-        merges,
+        worksheet, headerMap.columns.oldItemCode, rowNumber, merges,
+      );
+      const rawItemCode = this.readEffectiveValue(
+        worksheet, headerMap.columns.itemCode, rowNumber, merges,
       );
       const rawQuantity = this.readEffectiveValue(
         worksheet,
-        headerMap.columns.quantity,
+        this.isFtl() ? headerMap.columns.targetOrderCasepackQty : headerMap.columns.quantity,
         rowNumber,
         merges,
       );
 
-      // Blank rows and pre-data notes are ignored. A marked additional-pallet
-      // row must stay in the output even though its regular item fields can be blank.
-      if (isBlank(rawOldItemCode) && isBlank(rawQuantity) && !isAdditionalPallet) {
-        continue;
-      }
-      if (!hasReachedData && isBlank(rawQuantity) && !isAdditionalPallet) {
-        continue;
-      }
+      // FTL has no dependency on the old QTY column. A populated Item Code,
+      // Old Item code, or target-order casepack quantity identifies a data row.
+      const hasIdentifyingData = this.isFtl()
+        ? !isBlank(rawItemCode) || !isBlank(rawOldItemCode) || !isBlank(rawQuantity)
+        : !isBlank(rawOldItemCode) || !isBlank(rawQuantity);
+      if (!hasIdentifyingData && !isAdditionalPallet) continue;
+      if (!hasReachedData && isBlank(rawQuantity) && !isAdditionalPallet) continue;
       hasReachedData = true;
 
       const customerPo = this.readRequiredTextValue({
@@ -226,6 +225,17 @@ export class InputWorkbookReader {
         field: "Customer PO",
         reporter,
       });
+      const itemCode = (this.isLtl() || this.isFtl())
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.itemCode,
+            rowNumber,
+            field: "Item Code",
+            reporter,
+            isAdditionalPallet,
+          })
+        : "";
       const oldItemCode = this.readRequiredTextValue({
         worksheet,
         merges,
@@ -235,15 +245,29 @@ export class InputWorkbookReader {
         reporter,
         isAdditionalPallet,
       });
-      const quantity = this.readRequiredTextValue({
-        worksheet,
-        merges,
-        columnIndex: headerMap.columns.quantity,
-        rowNumber,
-        field: "Quantity",
-        reporter,
-        isAdditionalPallet,
-      });
+      const quantity = this.isLtl()
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.quantity,
+            rowNumber,
+            field: "Quantity",
+            reporter,
+            isAdditionalPallet,
+          })
+        : "";
+
+      const targetOrderCasepackQty = this.isFtl()
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.targetOrderCasepackQty,
+            rowNumber,
+            field: "target order casepack qty",
+            reporter,
+            isAdditionalPallet,
+          })
+        : "";
 
       const targetStore = this.readEffectiveValue(
         worksheet,
@@ -263,11 +287,11 @@ export class InputWorkbookReader {
           field: "Target Store",
           message: `Input cell ${targetStoreSourceLocation} is blank.`,
           resolution:
-            "Destination is a template dropdown, so it will be left blank. FTL pickup references will use ERROR for the missing Store #.",
+            "Destination is a template dropdown, so it will be left blank. Grouping will isolate this row if the Store # cannot be read.",
         });
       }
 
-      const pickupNumber = this.isLtl()
+      const pickupNumber = (this.isLtl() || this.isFtl())
         ? this.readRequiredTextValue({
             worksheet,
             merges,
@@ -275,6 +299,30 @@ export class InputWorkbookReader {
             rowNumber,
             field: "Pickup Number",
             reporter,
+          })
+        : "";
+
+      const casepackQty = this.isLtl()
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.casepackQty,
+            rowNumber,
+            field: "casepack qty",
+            reporter,
+            isAdditionalPallet,
+          })
+        : "";
+
+      const casepackValue = this.isLtl()
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.casepackValue,
+            rowNumber,
+            field: "casepack Value",
+            reporter,
+            isAdditionalPallet,
           })
         : "";
 
@@ -289,26 +337,13 @@ export class InputWorkbookReader {
           })
         : "";
 
+      // Legacy FTL Pallet and China PO fields are optional and no longer
+      // drive output calculations, but they remain available for diagnostics.
       const pallet = this.isFtl()
-        ? this.readPositiveNumberOrError({
-            worksheet,
-            merges,
-            columnIndex: headerMap.columns.pallet,
-            rowNumber,
-            field: "Pallet",
-            reporter,
-          })
+        ? this.readOptionalHeaderValue(worksheet, headerMap.columns.pallet, rowNumber, merges)
         : "";
-
       const chinaPo = this.isFtl()
-        ? this.readRequiredTextValue({
-            worksheet,
-            merges,
-            columnIndex: headerMap.columns.chinaPo,
-            rowNumber,
-            field: "China PO",
-            reporter,
-          })
+        ? this.readOptionalHeaderValue(worksheet, headerMap.columns.chinaPo, rowNumber, merges)
         : "";
 
       const skidRange = this.findSkidRangeForRow(
@@ -329,9 +364,13 @@ export class InputWorkbookReader {
         customerPo,
         targetStore,
         targetStoreSourceLocation,
+        itemCode,
         oldItemCode,
         quantity,
         pickupNumber,
+        casepackQty,
+        casepackValue,
+        targetOrderCasepackQty,
         truckNumber,
         pallet,
         chinaPo,
@@ -357,7 +396,7 @@ export class InputWorkbookReader {
         field: "Input item rows",
         message: "No item rows were found below the required input header row.",
         resolution:
-          "Check that item rows contain values in both Old Item code and QTY, or are marked Additional Pallet in the container column.",
+          "Check that item rows contain values in item/detail columns, or are marked Additional Pallet in the container column.",
       });
     }
 
@@ -841,7 +880,14 @@ export class InputWorkbookReader {
     reporter,
     isAdditionalPallet = false,
   }) {
-    const value = this.readEffectiveValue(worksheet, columnIndex, rowNumber, merges);
+    // FTL catalog codes can be Excel-formatted text (e.g. 001234). Prefer
+    // the displayed code for cross-reference fields so leading zeroes survive.
+    // Other inputs retain their original numeric/text values for calculations.
+    const preserveDisplayedCode = this.isFtl() &&
+      (field === "Item Code" || field === "Old Item Code");
+    const value = preserveDisplayedCode
+      ? getCellDisplayValue(this.readEffectiveCell(worksheet, columnIndex, rowNumber, merges)).trim()
+      : this.readEffectiveValue(worksheet, columnIndex, rowNumber, merges);
     if (!isBlank(value)) return value;
 
     const location = this.addressFor(columnIndex, rowNumber);

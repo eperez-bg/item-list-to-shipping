@@ -4,7 +4,7 @@
  * ╠══════════════════════════════════════════════════════════════════════════╣
  * ║ RESPONSIBILITY                                                             ║
  * ║ Centralizes the fixed business rules, header names, template locations,    ║
- * ║ defaults, and field-to-template mappings for both shipping modes.          ║
+ * ║ defaults, catalog locations, and field-to-template mappings for both modes.║
  * ║                                                                            ║
  * ║ WHY THIS FILE EXISTS                                                       ║
  * ║ Keeping this responsibility in one focused file makes the spreadsheet      ║
@@ -50,6 +50,7 @@ export const APP_CONFIG = {
     headers: {
       customerPo: "CustomerPO",
       targetStore: "Store #",
+      itemCode: "Item Code",
       oldItemCode: "Old Item code",
       quantity: "QTY",
       length: 'L"',
@@ -57,6 +58,9 @@ export const APP_CONFIG = {
       height: 'H"',
       grossWeight: "G.W. (LBS)",
       pickupNumber: "IF",
+      casepackQty: "casepack qty",
+      casepackValue: "casepack Value",
+      targetOrderCasepackQty: "target order casepack qty",
       truckNumber: "Truck #",
       pallet: "Pallet",
       chinaPo: "China PO",
@@ -68,6 +72,7 @@ export const APP_CONFIG = {
         requiredFields: [
           "customerPo",
           "targetStore",
+          "itemCode",
           "oldItemCode",
           "quantity",
           "length",
@@ -75,27 +80,31 @@ export const APP_CONFIG = {
           "height",
           "grossWeight",
           "pickupNumber",
+          "casepackQty",
+          "casepackValue",
         ],
         skidGroupingFields: ["length", "width", "height"],
         optionalFields: ["container"],
       },
 
       [SHIPPING_MODES.FTL]: {
+        // FTL now uses Item Code + target order casepack qty, not source QTY.
+        // Pallet and China PO are accepted if present but are no longer used.
         requiredFields: [
           "customerPo",
           "targetStore",
+          "itemCode",
           "oldItemCode",
-          "quantity",
+          "targetOrderCasepackQty",
           "length",
           "width",
           "height",
           "grossWeight",
+          "pickupNumber",
           "truckNumber",
-          "pallet",
-          "chinaPo",
         ],
         skidGroupingFields: ["length", "width", "height"],
-        optionalFields: ["container"],
+        optionalFields: ["container", "pallet", "chinaPo"],
       },
     },
   },
@@ -104,6 +113,7 @@ export const APP_CONFIG = {
     projectName: "Fuse Order",
     origin: "2354 Davis Ave",
     packaging: "Pallet",
+    ltlPackaging: "Cartons",
     stackable: "no",
   },
 
@@ -115,6 +125,21 @@ export const APP_CONFIG = {
   freight: {
     // Leave null to use the automatic density bands already used by the LTL flow.
     classifier: null,
+  },
+
+  // The catalog is a static browser asset; only FTL loads it during export.
+  // Place BEELINEGROUPFX_L3.xlsx at public/catalogs/BEELINEGROUPFX_L3.xlsx.
+  ftlCatalog: {
+    url: `${templateBaseUrl}catalogs/BEELINEGROUPFX_L3.xlsx`,
+    // Catalog labels are on Excel row 11 (one-based), not row 1.
+    headerRowNumber: 11,
+    headers: {
+      // Input Item Code matches this catalog field; the catalog does not
+      // have a separate "Item Code" column.
+      manufacturerPartId: "Manufacturer Part ID",
+      description: "Item Description",
+      supplierPartId: "Supplier Part ID",
+    },
   },
 };
 
@@ -159,7 +184,7 @@ export const TEMPLATE_FIELDS_BY_MODE = {
     { key: "width", header: "Width (in)" },
     { key: "height", header: "Height (in)" },
     { key: "nmfcNumber", header: "NMFC Number" },
-    { key: "customerPoFinal", header: "Target PO#", occurrence: 3 },
+    { key: "customerPoFinal", header: "PO Number: 10 digit 450, 700" },
     { key: "notes", header: "Notes" },
     { key: "sku", header: "SKU" },
     { key: "stackable", header: "Stackable" },

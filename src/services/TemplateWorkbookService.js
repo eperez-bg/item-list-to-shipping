@@ -34,6 +34,7 @@ import JSZip from "jszip";
 import * as XLSX from "xlsx";
 import { FreightClassCalculator } from "./FreightClassCalculator";
 import { FtlOutputRowFactory } from "./FtlOutputRowFactory";
+import { FtlCatalogService } from "./FtlCatalogService";
 import { OutputRowFactory } from "./OutputRowFactory";
 import { TemplateDropdownService } from "./TemplateDropdownService";
 import { TemplateLayoutService } from "./TemplateLayoutService";
@@ -163,11 +164,17 @@ export class TemplateWorkbookService {
       issueReporter,
     });
     const freightClassCalculator = new FreightClassCalculator(this.appConfig.freight, issueReporter);
+    // FTL must load its catalog before output rows can be built. LTL never
+    // fetches this catalog and retains its existing processing behavior.
+    const catalogService = this.shippingMode === "FTL"
+      ? await new FtlCatalogService(this.appConfig.ftlCatalog).load()
+      : null;
     const outputRowFactory = this.createOutputRowFactory({
       layout,
       dropdownService,
       freightClassCalculator,
       issueReporter,
+      catalogService,
     });
     const outputRows = outputRowFactory.build(shipment);
 
@@ -198,16 +205,17 @@ export class TemplateWorkbookService {
    *   It builds shared dependencies and returns FtlOutputRowFactory for FTL or
    *   OutputRowFactory otherwise.
    */
-  createOutputRowFactory({ layout, dropdownService, freightClassCalculator, issueReporter }) {
+  createOutputRowFactory({ layout, dropdownService, freightClassCalculator, issueReporter, catalogService }) {
     const sharedOptions = {
       layout,
       dropdownService,
       freightClassCalculator,
       defaults: this.appConfig.defaults,
+      issueReporter,
     };
 
     if (this.shippingMode === "FTL") {
-      return new FtlOutputRowFactory({ ...sharedOptions, issueReporter });
+      return new FtlOutputRowFactory({ ...sharedOptions, issueReporter, catalogService });
     }
 
     return new OutputRowFactory(sharedOptions);

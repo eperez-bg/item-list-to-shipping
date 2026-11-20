@@ -24,7 +24,8 @@
  */
 
 import { ERROR_VALUE } from "../utils/importIssues";
-import { toFiniteNumber } from "../utils/text";
+import { normalizeText, toFiniteNumber } from "../utils/text";
+import { FtlItemGroup } from "./FtlItemGroup";
 
 /**
  * ┌──────────────────────────────────────────────────────────────────────────┐
@@ -121,6 +122,36 @@ export class Truckload {
    */
   isFirstItem(item) {
     return this.items[0] === item;
+  }
+
+  /**
+   * getCombinedItemGroups
+   * Parameters: none. Returns: FtlItemGroup[] in first-appearance order.
+   * Groups raw rows by case-insensitive Item Code within THIS truck, before
+   * any Quantity, Total Weight, Freight Class, or Pallets calculations occur.
+   * Missing/error Item Codes never combine with unrelated blank rows.
+   */
+  getCombinedItemGroups() {
+    const byItemCode = new Map();
+    const groups = [];
+
+    this.items.forEach((item) => {
+      const normalizedCode = normalizeText(item.itemCode);
+      const isInvalid = !normalizedCode || normalizedCode === "error" ||
+        normalizedCode.startsWith("error:");
+      const key = isInvalid ? `missing-item-code-row-${item.sourceRow}` : normalizedCode;
+
+      let group = byItemCode.get(key);
+      if (!group) {
+        group = new FtlItemGroup({ truck: this, firstItem: item });
+        byItemCode.set(key, group);
+        groups.push(group);
+      } else {
+        group.addItem(item);
+      }
+    });
+
+    return groups;
   }
 
   /*
