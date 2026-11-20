@@ -5,7 +5,7 @@
  * ║ Converts FTL Truckloads into template rows using the NEW business rules.║
  * ║ Every Truck # is one Order/Commodity block. Repeated Item Codes on that  ║
  * ║ truck are combined FIRST, then quantity, weight, pallets, and freight     ║
- * ║ are calculated. Catalog Description and SKU are checked by Item Code.     ║
+ * ║ are calculated. Weight sums G.W.; value is qty × ONE casepack price.   ║
  * ║                                                                          ║
  * ║ build             — one output row per combined truck/item group.          ║
  * ║ catalogFieldsFor  — lookup description and validate Supplier Part ID.      ║
@@ -61,10 +61,19 @@ export class FtlOutputRowFactory {
             context,
           );
 
-        // Aggregate every source row separately before using group metrics.
-        // Weight is SUM(qty_i × G.W._i), not SUM(qty_i) × G.W._first.
-        const quantity = this.aggregateOrError(group, "Quantity", group.sumQuantity());
+        // Step 1: group identical Truck # + Item Code rows (already done).
+        // Step 2: sum casepack quantities AND gross weights independently.
+        // Step 3: combined quantity × FIRST casepack price = Total Value.
+        // Prices are never added and quantity is never used for Total Weight.
+        const combinedQuantity = group.sumQuantity();
+        const quantity = this.aggregateOrError(group, "Quantity", combinedQuantity);
         const totalWeight = this.aggregateOrError(group, "Total Weight", group.sumWeight());
+        const totalValue = this.aggregateOrError(
+          group,
+          "Total Value",
+          group.calculateTotalValue(combinedQuantity),
+        );
+        this.warnOnConflictingPrices(group);
         const length = this.aggregateOrError(group, "Length", group.largestDimension("length"));
         const width = this.aggregateOrError(group, "Width", group.largestDimension("width"));
         const height = this.aggregateOrError(group, "Height", group.largestDimension("height"));
@@ -129,7 +138,7 @@ export class FtlOutputRowFactory {
           }),
           quantity,
           totalWeight,
-          totalValue: "",
+          totalValue,
           freightClass: isBlank(freightClass)
             ? ""
             : numericWhenPossible(dropdown("freightClass", freightClass, {
@@ -224,6 +233,32 @@ export class FtlOutputRowFactory {
       description,
       sku: codesMatch ? catalogRecord.supplierPartId : CONTRADICTING_CODES,
     };
+  }
+
+  /**
+   * warnOnConflictingPrices
+   * Parameters: FtlItemGroup. Returns: nothing; reports inconsistent prices.
+   * A combined Truck/Item Code output has one casepack price. We always keep
+   * the first row's original price, rather than adding prices or averaging.
+   * If subsequent source rows disagree, log the chosen price and all sources.
+   */
+  warnOnConflictingPrices(group) {
+    if (group.items.length < 2) return;
+
+    const firstPrice = group.getCasepackPrice();
+    const differingRows = group.items.slice(1).filter((item) => {
+      const value = Number(String(item.casepackPrice).replace(/,/g, ""));
+      return !Number.isFinite(value) || value !== firstPrice;
+    });
+    if (!differingRows.length) return;
+
+    this.issueReporter.record({
+      type: "FTL_COMBINED_CASEPACK_PRICE_MISMATCH",
+      location: `Input rows ${group.sourceRows.join(", ")}`,
+      field: "casepack price / Total Value",
+      message: `Combined Item Code "${group.representativeItem.itemCode}" has different casepack prices: ${group.items.map((item) => item.casepackPrice).join(", ")}.`,
+      resolution: `Using the first source row's price (${group.representativeItem.sourceRow}: ${group.representativeItem.casepackPrice}) for Total Value; prices were NOT summed.`,
+    });
   }
 
   /**

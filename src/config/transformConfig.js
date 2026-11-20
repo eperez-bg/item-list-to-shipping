@@ -61,6 +61,7 @@ export const APP_CONFIG = {
       casepackQty: "casepack qty",
       casepackValue: "casepack Value",
       targetOrderCasepackQty: "target order casepack qty",
+      casepackPrice: "casepack price",
       truckNumber: "Truck #",
       pallet: "Pallet",
       chinaPo: "China PO",
@@ -88,7 +89,9 @@ export const APP_CONFIG = {
       },
 
       [SHIPPING_MODES.FTL]: {
-        // FTL now uses Item Code + target order casepack qty, not source QTY.
+        // FTL requires both casepack quantity and casepack price. Quantity
+        // is summed within Truck # + Item Code groups; one price multiplies
+        // that combined quantity to produce Total Value.
         // Pallet and China PO are accepted if present but are no longer used.
         requiredFields: [
           "customerPo",
@@ -96,6 +99,7 @@ export const APP_CONFIG = {
           "itemCode",
           "oldItemCode",
           "targetOrderCasepackQty",
+          "casepackPrice",
           "length",
           "width",
           "height",

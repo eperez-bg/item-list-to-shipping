@@ -311,7 +311,8 @@ function App() {
       {shippingMode === SHIPPING_MODES.FTL && (
         <p className="modeHint">
           FTL requires <code>Truck #</code>, <code>Item Code</code>, <code>IF</code>,
-          and <code>target order casepack qty</code>. Repeated Item Codes on one truck
+          <code>target order casepack qty</code>, and <code>casepack price</code>.
+          Repeated Item Codes on one truck
           are combined. Headers are case-insensitive. The FTL catalog must exist at
           <code> public/catalogs/BEELINEGROUPFX_L3.xlsx</code>. A row marked
           <code> additional pallet</code> may omit regular item details.
@@ -352,6 +353,7 @@ function App() {
                     <th>Pickup IF</th>
                     <th>Casepack Qty</th>
                     <th>Total Weight</th>
+                    <th>Total Value</th>
                     <th>Pallets</th>
                   </tr>
                 ) : (
@@ -381,6 +383,7 @@ function App() {
                       <td>{row.pickupNumber}</td>
                       <td>{row.quantity}</td>
                       <td>{row.totalWeight}</td>
+                      <td>{row.totalValue}</td>
                       <td>{row.pallets}</td>
                     </tr>
                   ) : (
@@ -440,6 +443,7 @@ function buildPreviewRows(shipment, shippingMode) {
           pickupNumber: item.pickupNumber,
           quantity: group.sumQuantity() ?? ERROR_VALUE,
           totalWeight: group.sumWeight() ?? ERROR_VALUE,
+          totalValue: group.calculateTotalValue(group.sumQuantity()) ?? ERROR_VALUE,
           pallets: group.palletCount,
         };
       }),

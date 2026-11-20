@@ -4,11 +4,11 @@
  * ╠══════════════════════════════════════════════════════════════════════════╣
  * ║ Holds all occurrences of one Item Code on one Truck # before calculations.║
  * ║ Grouping raw rows first prevents repeated items from producing multiple   ║
- * ║ output rows or losing quantity, pallet count, or per-row weight.            ║
+ * ║ output rows or losing quantity, pallet count, or combined weight.            ║
  * ║                                                                          ║
  * ║ FtlItemGroup — accumulates raw items and computes post-merge metrics.      ║
  * ║ addItem      — preserves source order for reference fields.                ║
- * ║ sumQuantity / sumWeight / largestDimension — aggregate original rows.      ║
+ * ║ sumQuantity / sumWeight / calculateTotalValue — aggregate group metrics. ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
  */
 
@@ -29,8 +29,8 @@ export class FtlItemGroup {
   /**
    * addItem
    * Parameters: item (InputItem from the same truck and Item Code).
-   * Appends source rows without performing calculations, so sums always use
-   * each original quantity and G.W. rather than already-aggregated results.
+   * Appends source rows without calculating totals. Only after all duplicates
+   * have joined do we compute combined quantity, direct weight sum, and value.
    */
   addItem(item) {
     this.items.push(item);
@@ -90,21 +90,42 @@ export class FtlItemGroup {
 
   /**
    * sumWeight
-   * Parameters: none. Returns: sum of (casepack qty × source G.W.) or null.
-   * Multiplication happens for EVERY original row before summing. This avoids
-   * the common error of multiplying merged quantity by only the first weight.
+   * Parameters: none. Returns: sum of original G.W. (LBS) values or null.
+   * FTL total weight is additive across source rows sharing Truck # and Item
+   * Code; casepack quantity plays NO role in the calculation. Each item
+   * contributes its original grossWeight (not LTL's allocatedWeight).
+   * Missing/invalid weights fail the aggregate rather than becoming zero.
    */
   sumWeight() {
-    let total = 0;
-    for (const item of this.items) {
-      const quantity = toFiniteNumber(item.targetOrderCasepackQty);
-      const unitWeight = toFiniteNumber(item.grossWeight);
-      if (quantity === null || quantity < 0 || unitWeight === null || unitWeight <= 0) {
-        return null;
-      }
-      total += quantity * unitWeight;
-    }
-    return total;
+    const weights = this.items.map((item) => toFiniteNumber(item.grossWeight));
+    if (weights.some((weight) => weight === null || weight <= 0)) return null;
+    return weights.reduce((sum, weight) => sum + weight, 0);
+  }
+
+  /**
+   * getCasepackPrice
+   * Parameters: none. Returns: first item's nonnegative price or null.
+   * Repeated items have one casepack price per combined output row, not a sum
+   * of prices. The first source item's price is retained consistently; the
+   * output factory warns if other matching rows have different prices.
+   */
+  getCasepackPrice() {
+    const price = toFiniteNumber(this.representativeItem.casepackPrice);
+    return price !== null && price >= 0 ? price : null;
+  }
+
+  /**
+   * calculateTotalValue
+   * Parameters: combinedQuantity (sum of target order casepack qty).
+   * Returns: combined quantity × retained casepack price, or null if invalid.
+   * The quantity is summed first but the price is never summed or multiplied
+   * by the number of input rows.
+   */
+  calculateTotalValue(combinedQuantity) {
+    const quantity = toFiniteNumber(combinedQuantity);
+    const price = this.getCasepackPrice();
+    if (quantity === null || quantity < 0 || price === null) return null;
+    return quantity * price;
   }
 
   /**

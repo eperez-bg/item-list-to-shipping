@@ -269,6 +269,20 @@ export class InputWorkbookReader {
           })
         : "";
 
+      // FTL Total Value uses this unit price AFTER grouping duplicate items.
+      // It is required only for FTL and never changes LTL's casepack Value.
+      const casepackPrice = this.isFtl()
+        ? this.readRequiredTextValue({
+            worksheet,
+            merges,
+            columnIndex: headerMap.columns.casepackPrice,
+            rowNumber,
+            field: "casepack price",
+            reporter,
+            isAdditionalPallet,
+          })
+        : "";
+
       const targetStore = this.readEffectiveValue(
         worksheet,
         headerMap.columns.targetStore,
@@ -371,6 +385,7 @@ export class InputWorkbookReader {
         casepackQty,
         casepackValue,
         targetOrderCasepackQty,
+        casepackPrice,
         truckNumber,
         pallet,
         chinaPo,

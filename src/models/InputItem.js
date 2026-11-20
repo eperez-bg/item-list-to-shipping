@@ -64,6 +64,7 @@ export class InputItem {
     casepackQty = "",
     casepackValue = "",
     targetOrderCasepackQty = "",
+    casepackPrice = "",
     truckNumber = "",
     pallet = "",
     chinaPo = "",
@@ -90,8 +91,10 @@ export class InputItem {
     // LTL casepack values drive output Quantity and Total Value.
     this.casepackQty = casepackQty;
     this.casepackValue = casepackValue;
-    // FTL uses the new target-order casepack quantity instead of input QTY.
+    // FTL quantity is combined per Truck # + Item Code; its price is a
+    // single value per combined item (not an additive quantity).
     this.targetOrderCasepackQty = targetOrderCasepackQty;
+    this.casepackPrice = casepackPrice;
 
     // FTL-only source values. They remain empty in LTL mode.
     this.truckNumber = truckNumber;
